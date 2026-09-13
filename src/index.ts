@@ -9,6 +9,7 @@
 import { ingestGmail } from './ingest/gmail.ts';
 import { ingestQuo } from './ingest/quo.ts';
 import { rescueThread, responseInsert } from './db/threads.ts';
+import { listFailures } from './db/failures.ts';
 import { verifyQuoWebhook, webhookHeaders } from './lib/quo-signature.ts';
 
 export interface Env {
@@ -187,7 +188,8 @@ export default {
 
     // --- reads -------------------------------------------------
     if (req.method === 'GET' && path === 'board') {
-      return json({ user, board: await board(env) });
+      // ingest_failures: items ingest could not sync, including skipped ones, so a stuck record is visible.
+      return json({ user, board: await board(env), ingest_failures: await listFailures(env.DB) });
     }
     if (req.method === 'GET' && path === 'queue') {
       return json({ threads: await queue(env, user, mine) });

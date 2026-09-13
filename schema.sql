@@ -131,6 +131,23 @@ CREATE TABLE IF NOT EXISTS response (
 CREATE INDEX IF NOT EXISTS idx_response_time ON response(responded_at);
 
 -- ---------------------------------------------------------------
+-- Ingest failures: items (a Gmail thread, a Quo conversation) that failed
+-- to sync, so a stuck record is visible instead of silent. A Quo item that
+-- fails repeatedly is skipped (skipped_at) so it cannot hold the cursor
+-- back forever. A successful sync deletes the row. Shown on /api/board.
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ingest_failure (
+  source_id        TEXT NOT NULL REFERENCES source(id),
+  item_id          TEXT NOT NULL,            -- thread id: 'gmail:<id>' | 'quo:<conversation id>'
+  failures         INTEGER NOT NULL,         -- consecutive failed syncs
+  first_failed_at  INTEGER NOT NULL,
+  last_failed_at   INTEGER NOT NULL,
+  last_error       TEXT,
+  skipped_at       INTEGER,                  -- when ingest gave up and moved past it
+  PRIMARY KEY (source_id, item_id)
+);
+
+-- ---------------------------------------------------------------
 -- Sender rules: what the agent taught us by clicking Not customer
 -- or Spam. Applies going forward, and doubles as labelled training
 -- data if we ever want to revisit the rules with a model.

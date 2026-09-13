@@ -17,6 +17,7 @@
 import type { Env } from '../index.ts';
 import type { Observed } from '../lib/thread-state.ts';
 import { syncThread } from '../db/threads.ts';
+import { clearFailure, recordFailure, SKIP_AFTER_FAILURES } from '../db/failures.ts';
 
 const API = 'https://api.quo.com/v1/';
 const PAGE = '100';
@@ -126,40 +127,29 @@ export async function ingestQuo(env: Env) {
           const calls = c.participants.length === 1 ? await all<QuoCall>(env, 'calls', base) : [];
 
           const timeline = toTimeline(messages, calls);
-          if (!timeline.length) continue;
+          if (timeline.length) await syncConversation(env, src, c, messages, timeline, now);
+          await clearFailure(env.DB, src.id, `quo:${c.id}`);
 
-          const newest = (inbound: boolean): number | null => {
-            const times = timeline.filter((m) => m.inbound === inbound).map((m) => m.at);
-            return times.length ? Math.max(...times) : null;
-          };
-          const latest = [...messages].sort((a, b) => secs(b.createdAt) - secs(a.createdAt))[0];
-
-          await syncThread(env.DB, {
-            id: `quo:${c.id}`,
-            source_id: src.id,
-            brand_id: src.brand_id,
-            channel: 'phone',
-            subject: messages.length ? 'Text' : 'Call',
-            customer_name: c.name ?? null,
-            customer_handle: c.participants[0] ?? null,
-            refresh_customer: false,
-            preview: (latest?.text ?? '').slice(0, 200),
-            conversation_started_at: secs(c.createdAt),
-            newest_inbound_at: newest(true),
-            newest_outbound_at: newest(false),
-            timeline,
-          }, now);
-
-          const last = timeline[timeline.length - 1].at;
-          highWater = highWater === null ? last : Math.max(highWater, last);
+          if (timeline.length) {
+            const last = timeline[timeline.length - 1].at;
+            highWater = highWater === null ? last : Math.max(highWater, last);
+          }
         } catch (err) {
-          anyFailed = true;
-          console.error(`quo ingest skipped conversation ${c.id} on ${src.address}`, err);
+          // A conversation that keeps failing must not hold the cursor back
+          // forever. Hold it (retry next poll) until SKIP_AFTER_FAILURES, then
+          // skip past it; the record stays in ingest_failure for a human.
+          const { failures, skipped } = await recordFailure(env.DB, src.id, `quo:${c.id}`, err, now);
+          if (skipped) {
+            console.error(`quo ingest skipping conversation ${c.id} on ${src.address} after ${failures} failures (limit ${SKIP_AFTER_FAILURES}); see ingest_failure`, err);
+          } else {
+            anyFailed = true;
+            console.error(`quo ingest skipped conversation ${c.id} on ${src.address} (failure ${failures} of ${SKIP_AFTER_FAILURES}); will retry`, err);
+          }
         }
       }
 
-      // Advance the cursor only when every conversation synced. Otherwise hold
-      // it, so the failed conversation's messages are read again next poll.
+      // Advance the cursor unless a conversation failed and is still being
+      // retried. Otherwise hold it, so that conversation is read again next poll.
       await env.DB.prepare(
         `UPDATE source SET last_synced_at = ?2, sync_cursor = CASE WHEN ?3 THEN sync_cursor ELSE ?4 END WHERE id = ?1`
       ).bind(src.id, now, anyFailed ? 1 : 0, highWater === null ? null : String(highWater)).run();
@@ -167,4 +157,32 @@ export async function ingestQuo(env: Env) {
       console.error(`quo ingest failed for ${src.address}`, err);
     }
   }
+}
+
+/** Write one conversation's observed timeline to its thread. */
+async function syncConversation(
+  env: Env, src: { id: string; brand_id: string }, c: QuoConversation,
+  messages: QuoMessage[], timeline: Observed[], now: number,
+) {
+  const newest = (inbound: boolean): number | null => {
+    const times = timeline.filter((m) => m.inbound === inbound).map((m) => m.at);
+    return times.length ? Math.max(...times) : null;
+  };
+  const latest = [...messages].sort((a, b) => secs(b.createdAt) - secs(a.createdAt))[0];
+
+  await syncThread(env.DB, {
+    id: `quo:${c.id}`,
+    source_id: src.id,
+    brand_id: src.brand_id,
+    channel: 'phone',
+    subject: messages.length ? 'Text' : 'Call',
+    customer_name: c.name ?? null,
+    customer_handle: c.participants[0] ?? null,
+    refresh_customer: false,
+    preview: (latest?.text ?? '').slice(0, 200),
+    conversation_started_at: secs(c.createdAt),
+    newest_inbound_at: newest(true),
+    newest_outbound_at: newest(false),
+    timeline,
+  }, now);
 }
