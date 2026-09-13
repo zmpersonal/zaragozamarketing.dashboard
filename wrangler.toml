@@ -1,0 +1,27 @@
+name = "inhouse-ops"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "inhouse-ops"
+database_id = "PUT_YOUR_D1_ID_HERE"
+
+# Every 5 minutes. Well inside the free tier.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+ACCESS_TEAM = "CHANGE_ME"           # <team>.cloudflareaccess.com
+ACCESS_AUD  = "CHANGE_ME"           # Access app audience tag
+OWNERS      = "you@inhousewellness.com"
+
+# Secrets — set with `wrangler secret put NAME`, never in this file:
+#   GOOGLE_CLIENT_ID
+#   GOOGLE_CLIENT_SECRET
+#   GOOGLE_REFRESH_TOKENS
+#   QUO_API_KEY

@@ -1,0 +1,17 @@
+{
+  "name": "inhouse-ops",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute inhouse-ops --file=./schema.sql --remote",
+    "prove:gmail": "node prove/gmail.mjs",
+    "prove:quo": "node prove/quo.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260801.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support console</title>
+<style>
+  :root {
+    --ground: #e6ebe9;
+    --surface: #fcfdfc;
+    --line: #ccd6d3;
+    --pine: #16241f;
+    --steam: #6d817b;
+    --plunge: #2c6b8b;
+    --brass: #a8791f;
+    --ember: #9e3d16;
+    --radius: 3px;
+    --sans: ui-sans-serif, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--pine);
+    background: var(--ground);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button { font: inherit; color: inherit; cursor: pointer; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- shell ---------- */
+  .shell {
+    display: grid;
+    grid-template-columns: 172px minmax(0, 1fr) 340px;
+    min-height: 100vh;
+  }
+
+  .rail {
+    background: var(--pine);
+    color: #cfdad6;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 26px;
+  }
+  .rail h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: #fff;
+  }
+  .rail .who { font-size: 12px; color: #7f938d; margin-top: 3px; }
+  .rail nav { display: flex; flex-direction: column; gap: 1px; }
+  .rail nav button {
+    background: none; border: 0; text-align: left;
+    padding: 6px 8px; border-radius: var(--radius);
+    color: #a9bab5; font-size: 13px;
+  }
+  .rail nav button[aria-pressed="true"] { background: #263a33; color: #fff; }
+  .rail nav button:focus-visible { outline: 2px solid var(--plunge); outline-offset: 1px; }
+  .rail .heading {
+    font-size: 12px; color: #6d827c; margin-bottom: 7px;
+  }
+
+  main { padding: 22px 26px 60px; min-width: 0; }
+
+  .head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 16px; margin-bottom: 16px;
+  }
+  .head h2 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.015em; }
+  .head p { margin: 0; font-size: 13px; color: var(--steam); }
+
+  /* ---------- the matrix: brands down, channels across ---------- */
+  .matrix {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    margin-bottom: 30px;
+  }
+  .matrix th, .matrix td {
+    padding: 0; text-align: left;
+    border-bottom: 1px solid var(--line);
+  }
+  .matrix tr:last-child th, .matrix tr:last-child td { border-bottom: 0; }
+  .matrix thead th {
+    font-size: 12px; font-weight: 500; color: var(--steam);
+    padding: 9px 14px; background: #f3f6f5;
+  }
+  .matrix tbody th {
+    font-weight: 600; font-size: 14px; padding: 0 14px;
+    width: 190px; white-space: nowrap;
+  }
+  .matrix td { border-left: 1px solid var(--line); }
+
+  .cell {
+    display: block; width: 100%; background: none; border: 0;
+    padding: 11px 14px 13px; text-align: left;
+  }
+  .cell:hover { background: #f1f5f4; }
+  .cell:focus-visible { outline: 2px solid var(--plunge); outline-offset: -2px; }
+  .cell .count {
+    font-size: 26px; font-weight: 600; letter-spacing: -0.02em; line-height: 1;
+  }
+  .cell .oldest { font-size: 12px; color: var(--steam); margin-top: 4px; }
+  .cell.quiet .count { color: #b4c1bd; font-weight: 400; }
+
+  /* Heat bar: how long the oldest unanswered item has been sitting.
+     Cold plunge blue when fresh, sauna ember when it has been too long. */
+  .heat { height: 3px; margin-top: 8px; background: #dde5e3; border-radius: 2px; }
+  .heat span { display: block; height: 100%; border-radius: 2px; }
+
+  /* ---------- queue ---------- */
+  .filters { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .filters button {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 20px; padding: 3px 11px; font-size: 12.5px; color: var(--steam);
+  }
+  .filters button[aria-pressed="true"] {
+    background: var(--pine); border-color: var(--pine); color: #fff;
+  }
+
+  .queue { display: flex; flex-direction: column; gap: 1px; background: var(--line);
+           border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .row {
+    display: grid;
+    grid-template-columns: 4px 62px minmax(0,1fr) 128px 92px;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface);
+    border: 0; padding: 0; text-align: left; width: 100%;
+  }
+  .row:hover { background: #f2f6f5; }
+  .row[aria-selected="true"] { background: #e8f0f2; }
+  .row:focus-visible { outline: 2px solid var(--plunge); outline-offset: -2px; }
+  .row .edge { align-self: stretch; }
+  .row .age { font-size: 14px; font-weight: 600; padding: 11px 0; }
+  .row .body { min-width: 0; padding: 10px 0; }
+  .row .subject {
+    font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .row .from {
+    font-size: 12.5px; color: var(--steam);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .row .meta { font-size: 12.5px; color: var(--steam); }
+  .row .who { font-size: 12.5px; color: var(--steam); }
+
+  .chip {
+    display: inline-block; font-size: 11.5px; padding: 1px 7px;
+    border-radius: 20px; border: 1px solid currentColor;
+  }
+
+  .empty {
+    background: var(--surface); border: 1px dashed var(--line);
+    border-radius: var(--radius); padding: 34px; text-align: center; color: var(--steam);
+  }
+
+  /* ---------- right panel ---------- */
+  .panel {
+    background: var(--surface);
+    border-left: 1px solid var(--line);
+    padding: 20px 20px 40px;
+    display: flex; flex-direction: column; gap: 18px;
+    overflow-y: auto; max-height: 100vh; position: sticky; top: 0;
+  }
+  .panel h3 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+  .panel .sub { font-size: 12.5px; color: var(--steam); }
+  .section + .section { border-top: 1px solid var(--line); padding-top: 16px; }
+  .section > .label { font-size: 12px; color: var(--steam); margin-bottom: 8px; }
+
+  label.field { display: block; margin-bottom: 10px; }
+  label.field span { display: block; font-size: 12.5px; color: var(--steam); margin-bottom: 3px; }
+  select, textarea, input[type="text"] {
+    width: 100%; font: inherit; padding: 6px 8px;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: #fff; color: var(--pine);
+  }
+  textarea { resize: vertical; min-height: 74px; }
+  select:focus, textarea:focus, input:focus { outline: 2px solid var(--plunge); outline-offset: -1px; }
+
+  .save {
+    background: var(--pine); color: #fff; border: 0;
+    padding: 8px 16px; border-radius: var(--radius); font-weight: 500;
+  }
+  .save:hover { background: #233831; }
+  .save:disabled { background: #a9b6b2; cursor: not-allowed; }
+
+  .log { display: flex; flex-direction: column; gap: 11px; }
+  .log article { font-size: 13px; }
+  .log .when { font-size: 12px; color: var(--steam); }
+  .log p { margin: 2px 0 0; }
+
+  .todo { display: flex; gap: 9px; align-items: flex-start; padding: 7px 0; }
+  .todo + .todo { border-top: 1px solid #eef2f1; }
+  .todo input { margin-top: 3px; }
+  .todo .t { font-size: 13px; }
+  .todo .d { font-size: 12px; color: var(--steam); }
+  .todo.overdue .d { color: var(--ember); }
+
+  .add-todo { display: flex; gap: 6px; margin-top: 10px; }
+  .add-todo input { flex: 1; }
+  .add-todo button {
+    background: none; border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 0 12px; color: var(--steam);
+  }
+
+  @media (max-width: 1080px) {
+    .shell { grid-template-columns: 1fr; }
+    .panel { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); }
+    .rail { flex-direction: row; align-items: center; gap: 22px; padding: 12px 16px; }
+    .rail nav { flex-direction: row; }
+    .rail .heading, .rail .who { display: none; }
+    .row { grid-template-columns: 4px 52px minmax(0,1fr) 90px; }
+    .row .who { display: none; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .cell, .row { transition: background 90ms linear; }
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <aside class="rail">
+    <div>
+      <h1>Support console</h1>
+      <div class="who" id="whoami">Loading…</div>
+    </div>
+    <div>
+      <div class="heading">View</div>
+      <nav id="views">
+        <button data-view="board" aria-pressed="true">Everything</button>
+        <button data-view="mine" aria-pressed="false">My queue</button>
+      </nav>
+    </div>
+    <div>
+      <div class="heading">Brand</div>
+      <nav id="brands"></nav>
+    </div>
+  </aside>
+
+  <main>
+    <div class="head">
+      <div>
+        <h2 id="title">Waiting on us</h2>
+        <p id="subtitle"></p>
+      </div>
+      <p id="synced"></p>
+    </div>
+
+    <table class="matrix">
+      <thead>
+        <tr><th>Brand</th><th>Email</th><th>Phone</th><th>Chat</th></tr>
+      </thead>
+      <tbody id="matrix"></tbody>
+    </table>
+
+    <div class="filters" id="filters">
+      <button data-f="all" aria-pressed="true">All open</button>
+      <button data-f="unassigned" aria-pressed="false">Unassigned</button>
+      <button data-f="blocked" aria-pressed="false">Blocked</button>
+      <button data-f="overdue" aria-pressed="false">Over 24h</button>
+    </div>
+
+    <div class="queue" id="queue"></div>
+  </main>
+
+  <aside class="panel" id="panel"></aside>
+</div>
+
+<script type="module">
+// ---------------------------------------------------------------
+// Mock data. Delete MOCK and flip USE_API once D1 is seeded —
+// every fetch below already points at the real Worker routes.
+// ---------------------------------------------------------------
+const USE_API = false;
+
+const BRANDS = [
+  { id: 'inhouse',     name: 'InHouse Wellness' },
+  { id: 'thi',         name: 'THI' },
+  { id: 'caliza',      name: 'Caliza Group' },
+  { id: 'reachjulian', name: 'Reach Julian' },
+];
+
+const h = (n) => Math.floor(Date.now() / 1000) - n * 3600;
+
+const MOCK = {
+  user: { email: 'agent@inhousewellness.com', role: 'agent' },
+  threads: [
+    { id: 'gmail:1', brand_id: 'inhouse', channel: 'email', subject: 'Sauna heater tripping the breaker',
+      customer_name: 'Dana Reyes', customer_handle: 'dana@…', status: 'waiting', assignee: null,
+      first_inbound_at: h(41), preview: 'Third time this week. It runs about twenty minutes then cuts out.' },
+    { id: 'quo:1', brand_id: 'inhouse', channel: 'phone', subject: 'Missed call',
+      customer_name: 'Marcus Bell', customer_handle: '+1 512 555 0142', status: 'waiting', assignee: null,
+      first_inbound_at: h(29), preview: 'Voicemail: asking about the chiller warranty.' },
+    { id: 'gmail:2', brand_id: 'caliza', channel: 'email', subject: 'Invoice 2214 — wrong PO number',
+      customer_name: 'Priya Raman', customer_handle: 'ap@…', status: 'blocked', blocked_on: 'owner',
+      blocked_note: 'Needs Julian to confirm the revised PO before we reissue.',
+      assignee: 'agent@inhousewellness.com', first_inbound_at: h(19), preview: 'Our AP system rejected it.' },
+    { id: 'chat:1', brand_id: 'inhouse', channel: 'chat', subject: 'Plunge chiller sizing',
+      customer_name: 'Visitor', customer_handle: 'chat', status: 'waiting', assignee: null,
+      first_inbound_at: h(7), is_automated: 1, preview: 'Bot answered sizing, then they asked about 220v wiring.' },
+    { id: 'gmail:3', brand_id: 'thi', channel: 'email', subject: 'Reschedule install — Thursday?',
+      customer_name: 'Ken Ito', customer_handle: 'ken@…', status: 'waiting',
+      assignee: 'agent@inhousewellness.com', first_inbound_at: h(5), preview: 'Any chance we move to Thursday morning.' },
+    { id: 'gmail:4', brand_id: 'reachjulian', channel: 'email', subject: 'Podcast booking request',
+      customer_name: 'Sam Ortiz', customer_handle: 'sam@…', status: 'waiting', assignee: null,
+      first_inbound_at: h(2), preview: 'Pitching a guest for the December run.' },
+    { id: 'quo:2', brand_id: 'caliza', channel: 'phone', subject: 'Text',
+      customer_name: 'Rosa Lim', customer_handle: '+1 737 555 0198', status: 'blocked', blocked_on: 'shipping',
+      blocked_note: 'Carrier claim filed, waiting on their inspection.',
+      assignee: null, first_inbound_at: h(63), preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
+  ],
+  actions: {
+    'gmail:2': [
+      { actor: 'agent@inhousewellness.com', kind: 'note', created_at: h(6),
+        body: 'Flagged to Julian in Slack. He is out until Thursday.' },
+      { actor: 'agent@inhousewellness.com', kind: 'replied', created_at: h(17),
+        body: 'Told Priya we are correcting it and will reissue within two business days.' },
+    ],
+  },
+  todos: [
+    { id: 1, title: 'Call the sauna heater supplier about the breaker complaints',
+      brand_id: 'inhouse', due_at: h(-4), assignee: 'agent@inhousewellness.com' },
+    { id: 2, title: 'Chase carrier claim on the Caliza pallet',
+      brand_id: 'caliza', thread_id: 'quo:2', due_at: h(-30), assignee: null },
+    { id: 3, title: 'Write the 220v wiring FAQ so chat can answer it',
+      brand_id: 'inhouse', due_at: null, assignee: 'agent@inhousewellness.com' },
+  ],
+};
+
+// ---------------------------------------------------------------
+const state = { view: 'board', brand: null, filter: 'all', selected: null, ...MOCK };
+
+const api = async (path, opts) => {
+  if (!USE_API) return null;
+  const res = await fetch('/api/' + path, {
+    ...opts,
+    headers: { 'content-type': 'application/json', ...(opts?.headers ?? {}) },
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+};
+
+const NOW = () => Math.floor(Date.now() / 1000);
+const ageHours = (t) => (NOW() - t) / 3600;
+
+function ageLabel(t) {
+  const hrs = ageHours(t);
+  if (hrs < 1) return Math.max(1, Math.round(hrs * 60)) + 'm';
+  if (hrs < 48) return Math.round(hrs) + 'h';
+  return Math.round(hrs / 24) + 'd';
+}
+
+/** Fresh reads cold, stale reads hot. 24h is the line. */
+function heatColor(hrs) {
+  if (hrs < 4) return 'var(--plunge)';
+  if (hrs < 24) return 'var(--brass)';
+  return 'var(--ember)';
+}
+
+const openThreads = () => state.threads.filter((t) => t.status === 'waiting' || t.status === 'blocked');
+
+function visibleThreads() {
+  let rows = openThreads();
+  if (state.view === 'mine') rows = rows.filter((t) => t.assignee === state.user.email || !t.assignee);
+  if (state.brand) rows = rows.filter((t) => t.brand_id === state.brand);
+  if (state.filter === 'unassigned') rows = rows.filter((t) => !t.assignee);
+  if (state.filter === 'blocked') rows = rows.filter((t) => t.status === 'blocked');
+  if (state.filter === 'overdue') rows = rows.filter((t) => ageHours(t.first_inbound_at) > 24);
+  return rows.sort((a, b) => a.first_inbound_at - b.first_inbound_at);
+}
+
+// ---------------------------------------------------------------
+function renderRail() {
+  document.getElementById('whoami').textContent =
+    state.user.email.split('@')[0] + ' · ' + state.user.role;
+
+  const nav = document.getElementById('brands');
+  nav.innerHTML = '';
+  const mk = (id, name) => {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.setAttribute('aria-pressed', String(state.brand === id));
+    b.onclick = () => { state.brand = id; render(); };
+    nav.append(b);
+  };
+  mk(null, 'All brands');
+  BRANDS.forEach((b) => mk(b.id, b.name));
+}
+
+function renderMatrix() {
+  const body = document.getElementById('matrix');
+  body.innerHTML = '';
+  const rows = openThreads();
+
+  for (const brand of BRANDS) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.textContent = brand.name;
+    tr.append(th);
+
+    for (const channel of ['email', 'phone', 'chat']) {
+      const cell = rows.filter((t) => t.brand_id === brand.id && t.channel === channel);
+      const oldest = cell.length ? Math.min(...cell.map((t) => t.first_inbound_at)) : null;
+      const hrs = oldest ? ageHours(oldest) : 0;
+      // 48h fills the bar. Anything past that is already as loud as it gets.
+      const fill = Math.min(100, (hrs / 48) * 100);
+
+      const td = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'cell' + (cell.length ? '' : ' quiet');
+      btn.innerHTML =
+        '<div class="count num">' + (cell.length || '—') + '</div>' +
+        '<div class="oldest">' + (oldest ? 'oldest ' + ageLabel(oldest) : 'clear') + '</div>' +
+        '<div class="heat"><span style="width:' + fill + '%;background:' +
+          heatColor(hrs) + '"></span></div>';
+      btn.onclick = () => { state.brand = brand.id; state.filter = 'all'; render(); };
+      btn.setAttribute('aria-label',
+        cell.length + ' waiting on ' + channel + ' for ' + brand.name);
+      td.append(btn);
+      tr.append(td);
+    }
+    body.append(tr);
+  }
+}
+
+function renderQueue() {
+  const rows = visibleThreads();
+  const wrap = document.getElementById('queue');
+  wrap.innerHTML = '';
+
+  document.getElementById('title').textContent =
+    state.view === 'mine' ? 'My queue' : 'Waiting on us';
+  const total = openThreads().length;
+  const over = openThreads().filter((t) => ageHours(t.first_inbound_at) > 24).length;
+  document.getElementById('subtitle').textContent =
+    total + ' open across all brands' + (over ? ', ' + over + ' past 24 hours' : '');
+  document.getElementById('synced').textContent = 'Synced just now';
+
+  if (!rows.length) {
+    wrap.innerHTML =
+      '<div class="empty">Nothing waiting here. Pick another brand or clear the filter.</div>';
+    return;
+  }
+
+  for (const t of rows) {
+    const hrs = ageHours(t.first_inbound_at);
+    const el = document.createElement('button');
+    el.className = 'row';
+    el.setAttribute('aria-selected', String(state.selected === t.id));
+    el.innerHTML =
+      '<span class="edge" style="background:' + heatColor(hrs) + '"></span>' +
+      '<span class="age num" style="color:' + heatColor(hrs) + '">' +
+        ageLabel(t.first_inbound_at) + '</span>' +
+      '<span class="body">' +
+        '<span class="subject">' + esc(t.subject) + '</span><br>' +
+        '<span class="from">' + esc(t.customer_name ?? t.customer_handle ?? '') +
+          ' · ' + brandName(t.brand_id) + '</span>' +
+      '</span>' +
+      '<span class="meta">' +
+        (t.status === 'blocked'
+          ? '<span class="chip" style="color:var(--ember)">blocked: ' + esc(t.blocked_on) + '</span>'
+          : t.is_automated
+            ? '<span class="chip" style="color:var(--plunge)">bot handled</span>'
+            : esc(t.channel)) +
+      '</span>' +
+      '<span class="who">' + (t.assignee ? esc(t.assignee.split('@')[0]) : 'unassigned') + '</span>';
+    el.onclick = () => { state.selected = t.id; render(); };
+    wrap.append(el);
+  }
+}
+
+function renderPanel() {
+  const panel = document.getElementById('panel');
+  panel.innerHTML = '';
+
+  const t = state.threads.find((x) => x.id === state.selected);
+  if (t) panel.append(threadDetail(t));
+  panel.append(todoList());
+}
+
+function threadDetail(t) {
+  const frag = document.createElement('div');
+  frag.className = 'section';
+  frag.innerHTML =
+    '<h3>' + esc(t.subject) + '</h3>' +
+    '<div class="sub">' + esc(t.customer_name ?? '') + ' · ' + esc(t.customer_handle ?? '') +
+      ' · ' + brandName(t.brand_id) + '</div>' +
+    '<p style="font-size:13px;color:var(--steam);margin:10px 0 0">' + esc(t.preview ?? '') + '</p>';
+
+  // --- log an action -------------------------------------------
+  const form = document.createElement('div');
+  form.className = 'section';
+  form.innerHTML =
+    '<div class="label">Log what you did</div>' +
+    '<label class="field"><span>Action</span>' +
+      '<select id="kind">' +
+        '<option value="replied">Replied</option>' +
+        '<option value="called">Called</option>' +
+        '<option value="note">Internal note</option>' +
+        '<option value="escalated">Escalated</option>' +
+      '</select></label>' +
+    '<label class="field"><span>What you said or found</span>' +
+      '<textarea id="body" placeholder="Quoted a replacement heater, waiting on their serial number."></textarea></label>' +
+    '<label class="field"><span>Where does it stand now</span>' +
+      '<select id="status">' +
+        '<option value="answered">Answered — ball is with them</option>' +
+        '<option value="blocked">Blocked — we are stuck</option>' +
+        '<option value="waiting">Still needs a reply</option>' +
+        '<option value="closed">Closed</option>' +
+      '</select></label>' +
+    '<label class="field" id="blockwrap" hidden><span>Blocked on</span>' +
+      '<select id="blocked_on">' +
+        '<option value="customer">Customer</option>' +
+        '<option value="supplier">Supplier</option>' +
+        '<option value="shipping">Shipping / carrier</option>' +
+        '<option value="refund">Refund or billing</option>' +
+        '<option value="owner">Owner sign-off</option>' +
+        '<option value="other">Something else</option>' +
+      '</select></label>' +
+    '<button class="save" id="saveAction">Save action</button>';
+
+  const statusSel = form.querySelector('#status');
+  statusSel.onchange = () => {
+    form.querySelector('#blockwrap').hidden = statusSel.value !== 'blocked';
+  };
+
+  form.querySelector('#saveAction').onclick = async () => {
+    const payload = {
+      thread_id: t.id,
+      kind: form.querySelector('#kind').value,
+      body: form.querySelector('#body').value.trim(),
+      status: statusSel.value,
+      blocked_on: statusSel.value === 'blocked' ? form.querySelector('#blocked_on').value : null,
+    };
+    if (USE_API) await api('actions', { method: 'POST', body: JSON.stringify(payload) });
+
+    (state.actions[t.id] ??= []).unshift({ ...payload, actor: state.user.email, created_at: NOW() });
+    Object.assign(t, {
+      status: payload.status,
+      blocked_on: payload.blocked_on,
+      assignee: t.assignee ?? state.user.email,
+    });
+    if (payload.status !== 'waiting' && payload.status !== 'blocked') state.selected = null;
+    render();
+  };
+
+  const history = document.createElement('div');
+  history.className = 'section';
+  const log = state.actions[t.id] ?? [];
+  history.innerHTML = '<div class="label">History</div>' +
+    (log.length
+      ? '<div class="log">' + log.map((a) =>
+          '<article><div class="when">' + esc(a.actor.split('@')[0]) + ' · ' +
+            a.kind + ' · ' + ageLabel(a.created_at) + ' ago</div>' +
+          '<p>' + esc(a.body ?? '') + '</p></article>').join('') + '</div>'
+      : '<p class="sub">Nothing logged yet.</p>');
+
+  const box = document.createElement('div');
+  box.append(frag, form, history);
+  return box;
+}
+
+function todoList() {
+  const wrap = document.createElement('div');
+  wrap.className = 'section';
+  const mine = state.view === 'mine'
+    ? state.todos.filter((td) => td.assignee === state.user.email || !td.assignee)
+    : state.todos;
+
+  wrap.innerHTML = '<div class="label">To do</div>';
+
+  if (!mine.length) {
+    wrap.insertAdjacentHTML('beforeend', '<p class="sub">Nothing on the list. Add the next thing.</p>');
+  }
+
+  for (const td of mine) {
+    const overdue = td.due_at && td.due_at < NOW();
+    const row = document.createElement('div');
+    row.className = 'todo' + (overdue ? ' overdue' : '');
+    row.innerHTML =
+      '<input type="checkbox" aria-label="Mark done">' +
+      '<div><div class="t">' + esc(td.title) + '</div>' +
+      '<div class="d">' + brandName(td.brand_id) +
+        (td.due_at ? ' · due ' + (overdue ? ageLabel(td.due_at) + ' ago' : 'in ' + ageLabel(td.due_at)) : '') +
+      '</div></div>';
+    row.querySelector('input').onchange = async () => {
+      if (USE_API) await api('todos/' + td.id + '/done', { method: 'POST' });
+      state.todos = state.todos.filter((x) => x.id !== td.id);
+      render();
+    };
+    wrap.append(row);
+  }
+
+  const add = document.createElement('div');
+  add.className = 'add-todo';
+  add.innerHTML = '<input type="text" placeholder="Add a to-do"><button>Add</button>';
+  const input = add.querySelector('input');
+  const submit = async () => {
+    const title = input.value.trim();
+    if (!title) return;
+    const body = { title, brand_id: state.brand, assignee: state.user.email };
+    if (USE_API) await api('todos', { method: 'POST', body: JSON.stringify(body) });
+    state.todos.push({ id: Date.now(), ...body, due_at: null });
+    input.value = '';
+    render();
+  };
+  add.querySelector('button').onclick = submit;
+  input.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+  wrap.append(add);
+
+  return wrap;
+}
+
+// ---------------------------------------------------------------
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const brandName = (id) => BRANDS.find((b) => b.id === id)?.name ?? '—';
+
+function render() {
+  renderRail();
+  renderMatrix();
+  renderQueue();
+  renderPanel();
+  for (const b of document.querySelectorAll('#views button'))
+    b.setAttribute('aria-pressed', String(b.dataset.view === state.view));
+  for (const b of document.querySelectorAll('#filters button'))
+    b.setAttribute('aria-pressed', String(b.dataset.f === state.filter));
+}
+
+document.getElementById('views').onclick = (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  state.view = b.dataset.view;
+  render();
+};
+document.getElementById('filters').onclick = (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  state.filter = b.dataset.f;
+  render();
+};
+
+async function boot() {
+  if (USE_API) {
+    const [me, q, td] = await Promise.all([api('board'), api('queue'), api('todos')]);
+    state.user = me.user;
+    state.threads = q.threads;
+    state.todos = td.todos;
+    state.actions = {};
+    if (state.user.role === 'agent') state.view = 'mine';
+  }
+  render();
+}
+boot();
+</script>
+</body>
+</html>
