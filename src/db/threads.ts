@@ -22,7 +22,7 @@ export interface ThreadObservation {
   refresh_customer: boolean;
   preview: string;
   /** When the conversation began. Written on insert only. */
-  started_at: number;
+  conversation_started_at: number;
   newest_inbound_at: number | null;
   newest_outbound_at: number | null;
   timeline: Observed[];
@@ -42,19 +42,19 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
     const res = await db.prepare(`
       INSERT INTO thread (
         id, source_id, brand_id, channel, subject, customer_name, customer_handle,
-        preview, status, is_automated, first_inbound_at, last_inbound_at,
+        preview, status, is_automated, conversation_started_at, last_inbound_at,
         last_outbound_at, awaiting_since
       ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
       ON CONFLICT(id) DO NOTHING
     `).bind(
       o.id, o.source_id, o.brand_id, o.channel, o.subject, o.customer_name, o.customer_handle,
-      o.preview, state.status, o.is_automated ?? 0, o.started_at,
-      o.newest_inbound_at ?? o.started_at, o.newest_outbound_at, state.awaiting_since,
+      o.preview, state.status, o.is_automated ?? 0, o.conversation_started_at,
+      o.newest_inbound_at ?? o.conversation_started_at, o.newest_outbound_at, state.awaiting_since,
     ).run();
     return res.meta.changes > 0 ? 'inserted' : 'skipped';
   }
 
-  // first_inbound_at is deliberately absent: it never changes after insert.
+  // conversation_started_at is deliberately absent: it never changes after insert.
   const res = await db.prepare(`
     UPDATE thread SET
       customer_name    = CASE WHEN ?2 THEN ?3 ELSE customer_name END,
@@ -91,7 +91,7 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
 
 /**
  * Rescue a demoted thread into the queue. Changes the triage verdict and
- * logs who did it. Never touches first_inbound_at or awaiting_since: the
+ * logs who did it. Never touches conversation_started_at or awaiting_since: the
  * customer wrote when they wrote, and the response clock must say so.
  * Returns false if there is no such thread.
  */

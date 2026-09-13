@@ -40,7 +40,7 @@ export async function ingestQuo(env: Env) {
         // Quo's conversation list only reports the LATEST activity, so the
         // timeline is one event. lib/thread-state.ts holds an existing
         // awaiting_since across polls, which is what keeps the start of a run
-        // of unanswered texts. first_inbound_at is when we first saw the
+        // of unanswered texts. conversation_started_at is when we first saw the
         // conversation, not necessarily its first message.
         await syncThread(env.DB, {
           id: `quo:${c.id}`,
@@ -52,7 +52,7 @@ export async function ingestQuo(env: Env) {
           customer_handle: c.participants?.[0] ?? null,
           refresh_customer: false,
           preview: (c.previewText ?? '').slice(0, 200),
-          started_at: at,
+          conversation_started_at: at,
           newest_inbound_at: inbound ? at : null,
           newest_outbound_at: inbound ? null : at,
           timeline: [{ at, inbound }],

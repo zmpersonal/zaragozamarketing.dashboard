@@ -41,7 +41,7 @@ export async function upsertChat(env: Env, sourceId: string, c: NormalisedChat) 
     customer_handle: 'chat',
     refresh_customer: false,
     preview: c.preview.slice(0, 200),
-    started_at: c.startedAt,
+    conversation_started_at: c.startedAt,
     newest_inbound_at: c.lastInboundAt,
     newest_outbound_at: null,
     timeline,

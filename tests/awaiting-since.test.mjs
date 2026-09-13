@@ -1,5 +1,5 @@
 // awaiting_since: the oldest inbound message with no outbound after it.
-// NULL when we are caught up. The response clock runs from it; first_inbound_at
+// NULL when we are caught up. The response clock runs from it; conversation_started_at
 // is when the conversation began and never moves.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,17 +22,17 @@ const closeThread = (env, threadId, iso) =>
 
 // --- normal first contact --------------------------------------------------
 
-test('first contact: waiting, awaiting_since and first_inbound_at both = arrival', async () => {
+test('first contact: waiting, awaiting_since and conversation_started_at both = arrival', async () => {
   const env = makeEnv();
   await withGmail({ t1: [inbound(T0, DANA)] }, () => ingestGmail(env));
 
   const t = await row(env, 't1');
   assert.equal(t.status, 'waiting');
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
   assert.equal(t.awaiting_since, at(T0));
 });
 
-test('after our reply: answered, awaiting_since NULL, first_inbound_at unchanged', async () => {
+test('after our reply: answered, awaiting_since NULL, conversation_started_at unchanged', async () => {
   const env = makeEnv();
   const mailbox = { t1: [inbound(T0, DANA)] };
   await withGmail(mailbox, () => ingestGmail(env));
@@ -42,10 +42,10 @@ test('after our reply: answered, awaiting_since NULL, first_inbound_at unchanged
   const t = await row(env, 't1');
   assert.equal(t.status, 'answered');
   assert.equal(t.awaiting_since, null);
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
 });
 
-test('follow-ups after our reply: awaiting_since = oldest unanswered, not first_inbound_at', async () => {
+test('follow-ups after our reply: awaiting_since = oldest unanswered, not conversation_started_at', async () => {
   const env = makeEnv();
   const mailbox = { t1: [inbound(T0, DANA), outbound(T1)] };
   await withGmail(mailbox, () => ingestGmail(env));
@@ -55,7 +55,7 @@ test('follow-ups after our reply: awaiting_since = oldest unanswered, not first_
   const t = await row(env, 't1');
   assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T2));
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
 });
 
 // --- reopen ------------------------------------------------------------------
@@ -72,7 +72,7 @@ test('reopen: new inbound on a closed thread -> waiting, awaiting_since = that m
   const t = await row(env, 't1');
   assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T4));
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
 });
 
 test('reopen: a message that arrived before the close but was never synced still reopens', async () => {
@@ -104,7 +104,7 @@ test('reopen is logged, and the next sync does not slide back to a pre-close mes
   const t = await row(env, 't1');
   assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T4));
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
 
   const log = await env.DB.prepare(`SELECT actor, kind FROM action WHERE thread_id = 'gmail:t1'`).all();
   assert.deepEqual(log.results, [{ actor: 'system', kind: 'reopened' }]);
@@ -172,7 +172,7 @@ test('Quo first contact: waiting, awaiting_since = arrival', async () => {
   const t = await quoRow(env);
   assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T0));
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
 });
 
 test('Quo reopen: incoming activity after close -> waiting, awaiting_since = that activity', async () => {
@@ -185,7 +185,7 @@ test('Quo reopen: incoming activity after close -> waiting, awaiting_since = tha
   const t = await quoRow(env);
   assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T4));
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
 });
 
 test('chat first contact and reopen', async () => {
@@ -208,5 +208,5 @@ test('chat first contact and reopen', async () => {
   t = await chatRow();
   assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T4));
-  assert.equal(t.first_inbound_at, at(T0));
+  assert.equal(t.conversation_started_at, at(T0));
 });

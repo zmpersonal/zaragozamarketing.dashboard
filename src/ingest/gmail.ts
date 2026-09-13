@@ -89,7 +89,7 @@ export async function ingestGmail(env: Env) {
           customer_handle: emailOf(customerFrom),
           refresh_customer: true,
           preview: (t.snippet ?? '').slice(0, 200),
-          started_at: secs(msgs[0]),
+          conversation_started_at: secs(msgs[0]),
           newest_inbound_at: newest(true),
           newest_outbound_at: newest(false),
           timeline,

@@ -97,8 +97,10 @@ Response time is business minutes only -- America/Chicago, Mon-Fri 08:00-17:00
 (`src/lib/clock.ts`). Mail arriving Friday 16:50 is ten minutes old on Monday
 morning. We store the IANA zone name, never an offset, so CST/CDT handles itself.
 
-`first_inbound_at` is always arrival time, never the moment a demoted message was
-rescued -- otherwise the filter would quietly launder the slowest responses.
+The response clock runs from `awaiting_since` (the oldest inbound we have not
+answered). `conversation_started_at` is when the conversation began and never moves.
+Rescuing a demoted message never touches either -- otherwise the filter would quietly
+launder the slowest responses.
 
 ## Prove the sources first
 

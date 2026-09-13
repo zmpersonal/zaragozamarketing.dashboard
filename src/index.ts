@@ -98,19 +98,19 @@ async function board(env: Env) {
 
 /**
  * The queue. Longest-waiting first, measured from awaiting_since (the oldest
- * unanswered inbound), never first_inbound_at. Threads that are open but not
+ * unanswered inbound), never conversation_started_at. Threads that are open but not
  * awaiting us (blocked, already answered) sort after.
  */
 async function queue(env: Env, user: User, mine: boolean) {
   const sql = `
     SELECT t.id, t.brand_id, t.channel, t.subject, t.customer_name,
            t.customer_handle, t.preview, t.status, t.blocked_on, t.blocked_note,
-           t.assignee, t.priority, t.first_inbound_at, t.last_inbound_at,
+           t.assignee, t.priority, t.conversation_started_at, t.last_inbound_at,
            t.awaiting_since, t.is_automated
     FROM thread t
     WHERE t.status IN ('waiting','blocked')
       ${mine ? 'AND (t.assignee = ?1 OR t.assignee IS NULL)' : ''}
-    ORDER BY t.priority DESC, t.awaiting_since IS NULL, t.awaiting_since ASC, t.first_inbound_at ASC
+    ORDER BY t.priority DESC, t.awaiting_since IS NULL, t.awaiting_since ASC, t.conversation_started_at ASC
     LIMIT 200`;
   const stmt = mine
     ? env.DB.prepare(sql).bind(user.email)

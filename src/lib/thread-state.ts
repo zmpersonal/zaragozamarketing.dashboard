@@ -5,10 +5,10 @@
  * module what status and awaiting_since the thread should have. The rules
  * live here once so Gmail, Quo and chat cannot drift apart.
  *
- *   first_inbound_at  when the conversation began. Set on insert, never moved.
- *   awaiting_since    the oldest inbound message with no outbound after it.
- *                     NULL when we are caught up. The response clock runs
- *                     from here, never from first_inbound_at.
+ *   conversation_started_at  when the conversation began. Set on insert, never moved.
+ *   awaiting_since           the oldest inbound message with no outbound after it.
+ *                            NULL when we are caught up. The response clock runs
+ *                            from here, never from conversation_started_at.
  */
 import { businessMinutes } from './clock.ts';
 

@@ -13,7 +13,7 @@ import { makeEnv, withGmail, inbound, row, at } from './helpers/gmail.mjs';
 const ARRIVED = '2026-09-15T09:00:00-05:00'; // Tue 09:00, filed as bulk
 const RESCUED = '2026-09-17T15:00:00-05:00'; // Thu 15:00, agent spots it and rescues it
 
-test('rescue keeps first_inbound_at and awaiting_since at original arrival', async () => {
+test('rescue keeps conversation_started_at and awaiting_since at original arrival', async () => {
   const env = makeEnv();
   const mailbox = { t1: [inbound(ARRIVED, 'Dana Reyes <dana@example.com>')] };
   await withGmail(mailbox, () => ingestGmail(env));
@@ -27,7 +27,7 @@ test('rescue keeps first_inbound_at and awaiting_since at original arrival', asy
   const t = await row(env, 't1');
   assert.equal(t.triage, 'customer');
   assert.equal(t.triage_by, 'dana.agent@inhousewellness.com');
-  assert.equal(t.first_inbound_at, at(ARRIVED));
+  assert.equal(t.conversation_started_at, at(ARRIVED));
   assert.equal(t.awaiting_since, at(ARRIVED));
 
   // The clock measures from arrival: Tue 08h + Wed 9h + Thu 7h of business time.
@@ -52,11 +52,11 @@ test('the next ingest after a rescue moves neither timestamp nor the human verdi
   await withGmail(mailbox, () => ingestGmail(env));
 
   const t = await row(env, 't1');
-  assert.equal(t.first_inbound_at, at(ARRIVED));
+  assert.equal(t.conversation_started_at, at(ARRIVED));
   assert.equal(t.awaiting_since, at(ARRIVED));
   assert.equal(t.triage, 'customer');
 });
 
-test('responseMinutes is null when caught up, and never falls back to first_inbound_at', () => {
-  assert.equal(responseMinutes({ awaiting_since: null, first_inbound_at: at(ARRIVED) }, at(RESCUED)), null);
+test('responseMinutes is null when caught up, and never falls back to conversation_started_at', () => {
+  assert.equal(responseMinutes({ awaiting_since: null, conversation_started_at: at(ARRIVED) }, at(RESCUED)), null);
 });

@@ -52,14 +52,14 @@ CREATE TABLE IF NOT EXISTS thread (
   assignee        TEXT,                    -- agent email, null = unassigned
   priority        INTEGER NOT NULL DEFAULT 0,  -- 0 normal, 1 high, 2 urgent
 
-  first_inbound_at  INTEGER NOT NULL,      -- unix seconds — when the conversation began.
+  conversation_started_at  INTEGER NOT NULL,      -- unix seconds — when the conversation began.
                                            -- Set on insert, never updated.
   last_inbound_at   INTEGER NOT NULL,
   last_outbound_at  INTEGER,
   closed_at         INTEGER,
 
   -- The oldest inbound message with no outbound after it. NULL when we are
-  -- caught up. The response clock runs from here, never from first_inbound_at.
+  -- caught up. The response clock runs from here, never from conversation_started_at.
   -- A new inbound on a closed thread reopens it and sets this to that message.
   awaiting_since    INTEGER,
 
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS thread (
 
   -- response clock, measured in BUSINESS minutes (America/Chicago, Mon-Fri 8-5)
   -- from awaiting_since. Rescuing a demoted message changes triage only, never
-  -- first_inbound_at or awaiting_since, or the filter would launder slow responses.
+  -- conversation_started_at or awaiting_since, or the filter would launder slow responses.
   first_response_mins INTEGER,
 
   stage           TEXT,                    -- where this customer is in the process

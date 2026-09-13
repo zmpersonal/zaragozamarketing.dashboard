@@ -9,7 +9,7 @@ import { makeEnv, at } from './helpers/gmail.mjs';
 const observation = (timeline) => ({
   id: 'gmail:t1', source_id: 'gmail:support@inhousewellness.com', brand_id: 'inhouse', channel: 'email',
   subject: 'Sauna heater', customer_name: 'Dana Reyes', customer_handle: 'dana@example.com',
-  refresh_customer: true, preview: 'hi', started_at: timeline[0].at,
+  refresh_customer: true, preview: 'hi', conversation_started_at: timeline[0].at,
   newest_inbound_at: Math.max(...timeline.filter((m) => m.inbound).map((m) => m.at)),
   newest_outbound_at: null, timeline,
 });

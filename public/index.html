@@ -299,27 +299,27 @@ const MOCK = {
   threads: [
     { id: 'gmail:1', brand_id: 'inhouse', channel: 'email', subject: 'Sauna heater tripping the breaker',
       customer_name: 'Dana Reyes', customer_handle: 'dana@…', status: 'waiting', assignee: null,
-      first_inbound_at: h(41), awaiting_since: h(41), preview: 'Third time this week. It runs about twenty minutes then cuts out.' },
+      conversation_started_at: h(41), awaiting_since: h(41), preview: 'Third time this week. It runs about twenty minutes then cuts out.' },
     { id: 'quo:1', brand_id: 'inhouse', channel: 'phone', subject: 'Missed call',
       customer_name: 'Marcus Bell', customer_handle: '+1 512 555 0142', status: 'waiting', assignee: null,
-      first_inbound_at: h(29), awaiting_since: h(29), preview: 'Voicemail: asking about the chiller warranty.' },
+      conversation_started_at: h(29), awaiting_since: h(29), preview: 'Voicemail: asking about the chiller warranty.' },
     { id: 'gmail:2', brand_id: 'caliza', channel: 'email', subject: 'Invoice 2214 — wrong PO number',
       customer_name: 'Priya Raman', customer_handle: 'ap@…', status: 'blocked', blocked_on: 'owner',
       blocked_note: 'Needs Julian to confirm the revised PO before we reissue.',
-      assignee: 'agent@inhousewellness.com', first_inbound_at: h(19), awaiting_since: null, preview: 'Our AP system rejected it.' },
+      assignee: 'agent@inhousewellness.com', conversation_started_at: h(19), awaiting_since: null, preview: 'Our AP system rejected it.' },
     { id: 'chat:1', brand_id: 'inhouse', channel: 'chat', subject: 'Plunge chiller sizing',
       customer_name: 'Visitor', customer_handle: 'chat', status: 'waiting', assignee: null,
-      first_inbound_at: h(7), awaiting_since: h(7), is_automated: 1, preview: 'Bot answered sizing, then they asked about 220v wiring.' },
+      conversation_started_at: h(7), awaiting_since: h(7), is_automated: 1, preview: 'Bot answered sizing, then they asked about 220v wiring.' },
     { id: 'gmail:3', brand_id: 'thi', channel: 'email', subject: 'Reschedule install — Thursday?',
       customer_name: 'Ken Ito', customer_handle: 'ken@…', status: 'waiting',
-      assignee: 'agent@inhousewellness.com', first_inbound_at: h(5), awaiting_since: h(5), preview: 'Any chance we move to Thursday morning.' },
+      assignee: 'agent@inhousewellness.com', conversation_started_at: h(5), awaiting_since: h(5), preview: 'Any chance we move to Thursday morning.' },
     { id: 'gmail:4', brand_id: 'reachjulian', channel: 'email', subject: 'Podcast booking request',
       customer_name: 'Sam Ortiz', customer_handle: 'sam@…', status: 'waiting', assignee: null,
-      first_inbound_at: h(2), awaiting_since: h(2), preview: 'Pitching a guest for the December run.' },
+      conversation_started_at: h(2), awaiting_since: h(2), preview: 'Pitching a guest for the December run.' },
     { id: 'quo:2', brand_id: 'caliza', channel: 'phone', subject: 'Text',
       customer_name: 'Rosa Lim', customer_handle: '+1 737 555 0198', status: 'blocked', blocked_on: 'shipping',
       blocked_note: 'Carrier claim filed, waiting on their inspection.',
-      assignee: null, first_inbound_at: h(63), awaiting_since: null, preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
+      assignee: null, conversation_started_at: h(63), awaiting_since: null, preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
   ],
   actions: {
     'gmail:2': [
@@ -356,12 +356,12 @@ const NOW = () => Math.floor(Date.now() / 1000);
 const ageHours = (t) => (NOW() - t) / 3600;
 
 // Every age on this page runs from awaiting_since (the oldest inbound we have
-// not answered), never first_inbound_at. null = not waiting on us.
+// not answered), never conversation_started_at. null = not waiting on us.
 // TODO: still wall-clock hours; must become business minutes (CLAUDE.md invariant 5).
 const waitHours = (t) => (t.awaiting_since == null ? null : ageHours(t.awaiting_since));
 const longestWaitingFirst = (a, b) =>
   (a.awaiting_since ?? Infinity) === (b.awaiting_since ?? Infinity)
-    ? a.first_inbound_at - b.first_inbound_at
+    ? a.conversation_started_at - b.conversation_started_at
     : (a.awaiting_since ?? Infinity) < (b.awaiting_since ?? Infinity) ? -1 : 1;
 
 function ageLabel(t) {

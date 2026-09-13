@@ -43,11 +43,11 @@ the round asks for one. Don't run `wrangler deploy` (except the `--dry-run` in `
 - Refresh tokens printed by `prove/oauth-bootstrap.mjs` must never be pasted into chat, a
   commit, or any file that isn't gitignored.
 
-### 3. `thread.first_inbound_at` is when the conversation began, and never moves
+### 3. `thread.conversation_started_at` is when the conversation began, and never moves
 It is written on INSERT only and never updated, by ingest, a rescue, a reopen, or any action.
 The response clock does **not** run from it (see invariant 4).
 - **Enforced today:** `syncThread()` in `src/db/threads.ts` is the only ingest write path. Its
-  UPDATE has no `first_inbound_at` column. `rescueThread()` and `POST /api/actions` don't write
+  UPDATE has no `conversation_started_at` column. `rescueThread()` and `POST /api/actions` don't write
   it either. Tests: `tests/awaiting-since.test.mjs`, `tests/rescue.test.mjs`.
 - What "began" means per source:
   - **Gmail:** the thread's first message, which can be ours.
@@ -58,7 +58,7 @@ The response clock does **not** run from it (see invariant 4).
 ### 4. The response clock runs from `awaiting_since`
 `thread.awaiting_since` is the oldest inbound message with no outbound after it. It is NULL when
 we're caught up. The response clock, queue order, board "oldest" and every UI age run from it,
-never from `first_inbound_at`. The rules live once, in `src/lib/thread-state.ts` (pure).
+never from `conversation_started_at`. The rules live once, in `src/lib/thread-state.ts` (pure).
 - **Reopen:** a new inbound on a `closed` thread sets status back to `waiting`, sets
   `awaiting_since` to that message's time, and logs a `system` / `reopened` action.
   - "New" means newer than the stored `last_inbound_at`, not newer than `closed_at`. That way a
@@ -70,11 +70,11 @@ never from `first_inbound_at`. The rules live once, in `src/lib/thread-state.ts`
   A reopened thread can't slide back to a pre-close message on the next sync.
 - **Rescue:** rescuing a demoted message (`rescueThread`, `POST /api/threads/:id/rescue`) changes
   `triage` and `triage_by` and logs a `rescued` action, **only**. It never writes
-  `first_inbound_at` or `awaiting_since`, so the clock runs from when the customer actually
+  `conversation_started_at` or `awaiting_since`, so the clock runs from when the customer actually
   wrote. Violating this launders slow responses into good numbers and silently corrupts the
   admin report.
 - `responseMinutes(thread, now)` returns null when caught up. It never falls back to
-  `first_inbound_at`.
+  `conversation_started_at`.
 
 ### 5. Triage never deletes or hides mail
 It only demotes, and every demotion carries its reason codes through to the UI.
