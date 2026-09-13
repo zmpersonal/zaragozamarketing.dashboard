@@ -17,9 +17,8 @@ export interface Env {
   ACCESS_AUD: string;      // Cloudflare Access application audience tag
   ACCESS_TEAM: string;     // e.g. "inhouse" for inhouse.cloudflareaccess.com
   OWNERS: string;          // comma-separated emails that get the owner view
-  GOOGLE_CLIENT_ID: string;
-  GOOGLE_CLIENT_SECRET: string;
-  GOOGLE_REFRESH_TOKENS: string; // JSON: { "support@inhousewellness.com": "1//0..." }
+  /** Service-account key JSON (domain-wide delegation, gmail.readonly). A secret; Workers have no filesystem. */
+  GOOGLE_SERVICE_ACCOUNT_JSON: string;
   QUO_API_KEY: string;
   QUO_WEBHOOK_SECRET: string;    // whsec_... signing key returned when the webhook is created (Standard Webhooks)
   ASSETS: Fetcher;

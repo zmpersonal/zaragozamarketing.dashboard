@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
 import { ingestGmail } from '../src/ingest/gmail.ts';
 import { withGmail, inbound, MAILBOX, row } from './helpers/gmail.mjs';
+import { SERVICE_ACCOUNT_JSON } from './helpers/google-sa.mjs';
 import { makeApiEnv, withAccess, mintToken, apiRequest, insertThread, OWNER } from './helpers/access.mjs';
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -42,9 +43,7 @@ test('moving to blocked sets blocked_since; staying blocked keeps it; leaving cl
 
 test('a sync on a blocked thread leaves blocked_since alone', async () => {
   const env = makeApiEnv();
-  env.GOOGLE_CLIENT_ID = 'x.apps.googleusercontent.com';
-  env.GOOGLE_CLIENT_SECRET = 's';
-  env.GOOGLE_REFRESH_TOKENS = JSON.stringify({ [MAILBOX]: 'r' });
+  env.GOOGLE_SERVICE_ACCOUNT_JSON = SERVICE_ACCOUNT_JSON;
   const mailbox = { t1: [inbound(new Date((nowSec() - 2 * HOUR) * 1000).toISOString(), 'Dana <dana@example.com>')] };
   await withGmail(mailbox, () => ingestGmail(env));
   await act(env, { thread_id: 'gmail:t1', kind: 'note', status: 'blocked', blocked_on: 'shipping' });
@@ -74,9 +73,7 @@ test('queue: waiting threads first by awaiting_since, then blocked by blocked_si
 
 test('a customer chasing a blocked thread moves it out of the blocked group in the queue', async () => {
   const env = makeApiEnv();
-  env.GOOGLE_CLIENT_ID = 'x.apps.googleusercontent.com';
-  env.GOOGLE_CLIENT_SECRET = 's';
-  env.GOOGLE_REFRESH_TOKENS = JSON.stringify({ [MAILBOX]: 'r' });
+  env.GOOGLE_SERVICE_ACCOUNT_JSON = SERVICE_ACCOUNT_JSON;
   const n = nowSec();
   insertThread(env, { id: 'gmail:waiting-1h', awaiting_since: n - 1 * HOUR });
   insertThread(env, { id: 'gmail:blocked-6d', status: 'blocked', awaiting_since: null, blocked_since: n - 6 * DAY });

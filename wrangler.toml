@@ -21,8 +21,7 @@ ACCESS_AUD  = "CHANGE_ME"           # Access app audience tag
 OWNERS      = "you@inhousewellness.com"
 
 # Secrets — set with `wrangler secret put NAME`, never in this file:
-#   GOOGLE_CLIENT_ID
-#   GOOGLE_CLIENT_SECRET
-#   GOOGLE_REFRESH_TOKENS
+#   GOOGLE_SERVICE_ACCOUNT_JSON  (service-account key JSON; domain-wide delegation, gmail.readonly)
+#                                npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON < /path/to/key.json
 #   QUO_API_KEY
 #   QUO_WEBHOOK_SECRET      (whsec_... key returned by POST /webhooks, Quo-Api-Version 2026-03-30)

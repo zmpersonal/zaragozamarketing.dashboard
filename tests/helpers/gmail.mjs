@@ -2,6 +2,9 @@
 // threads.get endpoints that src/ingest/gmail.ts calls, from an in-memory
 // mailbox the test mutates between ingest runs.
 import { makeD1 } from './d1.mjs';
+import { SERVICE_ACCOUNT_JSON, TOKEN_URI, verifyAssertion, tokenResponse } from './google-sa.mjs';
+
+export { SERVICE_ACCOUNT_JSON };
 
 export const MAILBOX = 'support@inhousewellness.com';
 export const SOURCE_ID = `gmail:${MAILBOX}`;
@@ -26,20 +29,31 @@ export function makeEnv() {
   `);
   return {
     DB,
-    GOOGLE_CLIENT_ID: 'test-client.apps.googleusercontent.com',
-    GOOGLE_CLIENT_SECRET: 'test-secret',
-    GOOGLE_REFRESH_TOKENS: JSON.stringify({ [MAILBOX]: 'test-refresh' }),
+    GOOGLE_SERVICE_ACCOUNT_JSON: SERVICE_ACCOUNT_JSON,
   };
 }
 
-/** Run fn with fetch answering from `threads` ({ [threadId]: message[] }). */
-export async function withGmail(threads, fn) {
+/**
+ * Run fn with fetch answering from `threads` ({ [threadId]: message[] }).
+ * The token endpoint only accepts a valid service-account JWT-bearer assertion.
+ * Gmail calls must carry the token minted for the impersonated mailbox.
+ */
+export async function withGmail(threads, fn, { onToken, onGmail } = {}) {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
     const ok = (body) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
 
-    if (url.href === 'https://oauth2.googleapis.com/token') return ok({ access_token: 'test-access' });
+    if (url.href === TOKEN_URI) {
+      const body = String(init?.body ?? '');
+      onToken?.(await verifyAssertion(body));
+      return tokenResponse(body);
+    }
+    const headers = new Headers(init?.headers);
+    onGmail?.(headers);
+    if (!/^Bearer sa-token-for-/.test(headers.get('authorization') ?? '')) {
+      return new Response(JSON.stringify({ error: { code: 401, message: 'no service-account token' } }), { status: 401 });
+    }
 
     const path = url.pathname.replace('/gmail/v1/users/me/', '');
     if (path === 'threads') {

@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
 import { ingestGmail } from '../src/ingest/gmail.ts';
 import { withGmail, inbound, MAILBOX, row } from './helpers/gmail.mjs';
+import { SERVICE_ACCOUNT_JSON } from './helpers/google-sa.mjs';
 import { makeApiEnv, withAccess, mintToken, apiRequest } from './helpers/access.mjs';
 
 const DANA = 'Dana Reyes <dana@example.com>';
@@ -14,9 +15,7 @@ const hoursAgo = (h) => new Date(Date.now() - h * 3600_000).toISOString();
 
 function env() {
   const e = makeApiEnv();
-  e.GOOGLE_CLIENT_ID = 'test-client.apps.googleusercontent.com';
-  e.GOOGLE_CLIENT_SECRET = 'test-secret';
-  e.GOOGLE_REFRESH_TOKENS = JSON.stringify({ [MAILBOX]: 'test-refresh' });
+  e.GOOGLE_SERVICE_ACCOUNT_JSON = SERVICE_ACCOUNT_JSON;
   return e;
 }
 

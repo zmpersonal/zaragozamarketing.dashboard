@@ -10,6 +10,7 @@ import { businessMinutes } from '../src/lib/clock.ts';
 import { responseInsert } from '../src/db/threads.ts';
 import { insertThread } from './helpers/access.mjs';
 import { withGmail, inbound, outbound, MAILBOX, at } from './helpers/gmail.mjs';
+import { SERVICE_ACCOUNT_JSON } from './helpers/google-sa.mjs';
 import { makeApiEnv, withAccess, mintToken, apiRequest } from './helpers/access.mjs';
 import { makeQuoEnv, makeQuoAccount, withQuo } from './helpers/quo.mjs';
 
@@ -24,9 +25,7 @@ const MON_0810 = '2026-09-14T08:10:00-05:00';
 
 function env() {
   const e = makeApiEnv();
-  e.GOOGLE_CLIENT_ID = 'x.apps.googleusercontent.com';
-  e.GOOGLE_CLIENT_SECRET = 's';
-  e.GOOGLE_REFRESH_TOKENS = JSON.stringify({ [MAILBOX]: 'r' });
+  e.GOOGLE_SERVICE_ACCOUNT_JSON = SERVICE_ACCOUNT_JSON;
   return e;
 }
 const responses = async (e, id = 'gmail:t1') => (await e.DB.prepare(

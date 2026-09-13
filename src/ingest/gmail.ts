@@ -11,35 +11,28 @@ import { emailOf } from '../lib/triage.ts';
 import type { Observed } from '../lib/thread-state.ts';
 import { syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure } from '../db/failures.ts';
+import { GMAIL_READONLY, parseServiceAccount, serviceAccountToken, type ServiceAccountKey } from '../lib/google-auth.ts';
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
-
-async function tokenFor(env: Env, mailbox: string): Promise<string> {
-  const tokens = JSON.parse(env.GOOGLE_REFRESH_TOKENS) as Record<string, string>;
-  const refresh = tokens[mailbox];
-  if (!refresh) throw new Error(`No refresh token stored for ${mailbox}`);
-
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.GOOGLE_CLIENT_ID,
-      client_secret: env.GOOGLE_CLIENT_SECRET,
-      refresh_token: refresh,
-      grant_type: 'refresh_token',
-    }),
-  });
-  if (!res.ok) throw new Error(`Token refresh failed for ${mailbox}: ${res.status}`);
-  return (await res.json<{ access_token: string }>()).access_token;
-}
 
 export async function ingestGmail(env: Env) {
   const { results: sources } = await env.DB
     .prepare(`SELECT * FROM source WHERE provider = 'gmail'`).all<any>();
+  if (!sources.length) return;
+
+  // One service account with domain-wide delegation reads every mailbox by
+  // impersonating it (sub = the mailbox), scope gmail.readonly only.
+  let serviceAccount: ServiceAccountKey;
+  try {
+    serviceAccount = parseServiceAccount(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  } catch (err) {
+    console.error(`gmail ingest skipped: GOOGLE_SERVICE_ACCOUNT_JSON is not usable (${(err as Error).message})`);
+    return;
+  }
 
   for (const src of sources) {
     try {
-      const token = await tokenFor(env, src.address);
+      const token = await serviceAccountToken(serviceAccount, src.address, GMAIL_READONLY);
       const auth = { Authorization: `Bearer ${token}` };
 
       const list = await fetch(
