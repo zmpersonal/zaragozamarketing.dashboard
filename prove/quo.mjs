@@ -2,64 +2,68 @@
 /**
  * PROVE THE SOURCE — Quo (formerly OpenPhone)
  *
- * Lists your Quo numbers, then pulls recent conversations on the first one
- * and prints which are waiting on us. Proves the API key and the shape of
- * the data before the ingest worker gets written.
+ * Lists your Quo numbers, then reads the last few days of conversations on
+ * one of them the same way ingest does (src/ingest/quo.ts, Quo v1 API): every
+ * message and call since a point in time, turned into a timeline, and judged
+ * waiting or answered by the same rules (src/lib/thread-state.ts). Proves the
+ * API key and the data shape before trusting the poller.
  *
- * Run:  node prove/quo.mjs
- * Needs: QUO_API_KEY  (Quo → Settings → API → Generate API key)
+ * Run:  node prove/quo.mjs                 # first number on the account, last 7 days
+ *       node prove/quo.mjs PN123abc --days 14
+ * Needs: QUO_API_KEY  (Quo → Settings → API → Generate API key), in the shell
+ *        or .dev.vars. Auth is the raw key in Authorization — no "Bearer ".
  *
- * Auth is the raw key in the Authorization header — no "Bearer " prefix.
- * The Quo-Api-Version header pins the response shape; leaving it off means
- * a Quo release can silently change your payload.
+ * Uses the v1 API: the dated 2026-03-30 API does not list conversations or
+ * messages yet, and v1 "remains fully supported".
  */
-
-const KEY = process.env.QUO_API_KEY;
-const API_VERSION = '2026-03-30';
-
-if (!KEY) fail('Missing QUO_API_KEY. Check for a truncated trailing "=".');
+import { existsSync } from 'node:fs';
+import { listPhoneNumbers, activeConversations, readConversation } from '../src/ingest/quo.ts';
+import { resolveState } from '../src/lib/thread-state.ts';
 
 function fail(msg) {
   console.error('\n  FAILED: ' + msg + '\n');
   process.exit(1);
 }
 
-async function quo(path, params = {}) {
-  const url = new URL('https://api.quo.com/' + path);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await fetch(url, {
-    headers: { Authorization: KEY, 'Quo-Api-Version': API_VERSION },
-  });
-  if (!res.ok) fail('Quo ' + path + ' returned ' + res.status + ': ' + (await res.text()));
-  return res.json();
-}
+if (process.env.QUO_API_KEY === undefined && existsSync('.dev.vars')) process.loadEnvFile('.dev.vars');
+const QUO_API_KEY = process.env.QUO_API_KEY;
+if (!QUO_API_KEY) fail('Missing QUO_API_KEY. Check for a truncated trailing "=".');
+const env = { QUO_API_KEY };
 
-const numbers = await quo('phone-numbers');
-const list = numbers.data ?? [];
-if (!list.length) fail('No phone numbers on this Quo account. Wrong key?');
+const args = process.argv.slice(2);
+const daysAt = args.indexOf('--days');
+const DAYS = daysAt >= 0 ? Number(args[daysAt + 1]) : 7;
+const chosen = args.find((a, i) => a.startsWith('PN') && args[i - 1] !== '--days');
+const SHOW = 10;
+
+const numbers = await listPhoneNumbers(env).catch((err) => fail(err.message));
+if (!numbers.length) fail('No phone numbers on this Quo account. Wrong key?');
 
 console.log('\n  Quo numbers:');
-for (const n of list) console.log('    ' + n.number + '  ' + (n.name ?? ''));
+for (const n of numbers) console.log('    ' + n.id + '  ' + n.number + '  ' + (n.name ?? ''));
 
-const first = list[0];
-const convos = await quo('conversations', { phoneNumberId: first.id, limit: 10 });
-const rows = convos.data ?? [];
-if (!rows.length) fail('Zero conversations on ' + first.number + '. Not fatal, but nothing to prove.');
+const phone = chosen ? numbers.find((n) => n.id === chosen) : numbers[0];
+if (!phone) fail(`${chosen} is not a number on this account.`);
 
-console.log('\n  ' + first.number + ' — newest ' + rows.length + ' conversations\n');
+const now = Math.floor(Date.now() / 1000);
+const since = now - DAYS * 86400;
+const conversations = (await activeConversations(env, phone.id, since).catch((err) => fail(err.message))).slice(0, SHOW);
+if (!conversations.length) fail(`No activity on ${phone.number} in the last ${DAYS} days. Not fatal, but nothing to prove.`);
 
-for (const c of rows) {
-  const at = new Date(c.lastActivityAt ?? c.updatedAt);
-  const hours = Math.round((Date.now() - at.getTime()) / 36e5);
-  // Direction of the last activity tells us who owes a reply.
-  const waiting = c.lastActivityDirection === 'incoming';
+console.log(`\n  ${phone.number} — ${conversations.length} most recent conversations, last ${DAYS} days\n`);
+
+const hours = (t) => String(Math.round((now - t) / 3600)).padStart(4) + 'h';
+for (const c of conversations) {
+  const { messages, calls, timeline } = await readConversation(env, c, since).catch((err) => fail(`${c.id}: ${err.message}`));
+  const state = resolveState(null, timeline);
+  const age = state.awaiting_since !== null ? hours(state.awaiting_since) : timeline.length ? hours(timeline.at(-1).at) : '    -';
+  const last = [...messages].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
   console.log(
-    '  ' + (waiting ? 'WAITING ' : 'answered') +
-    '  ' + String(hours).padStart(4) + 'h  ' +
-    String(c.name ?? c.participants?.[0] ?? 'unknown').padEnd(24) +
-    String(c.lastActivityType ?? '').padEnd(10) +
-    (c.previewText ?? '').slice(0, 40)
+    '  ' + (state.status === 'waiting' ? 'WAITING ' : 'answered') + '  ' + age + '  ' +
+    String(c.name ?? c.participants[0] ?? 'unknown').padEnd(24) +
+    `${messages.length} texts, ${calls.length} calls`.padEnd(20) +
+    (last?.text ?? '').replace(/\s+/g, ' ').slice(0, 40)
   );
 }
 
-console.log('\n  Source proved. Now wire the webhook so we stop polling.\n');
+console.log('\n  Source proved: v1 messages and calls read, waiting/answered by the ingest rules.\n');

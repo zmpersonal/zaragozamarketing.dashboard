@@ -29,7 +29,11 @@ const OVERLAP_SECONDS = 5 * 60;
 const secs = (isoDate: string) => Math.floor(Date.parse(isoDate) / 1000);
 const isoOf = (unix: number) => new Date(unix * 1000).toISOString();
 
-interface QuoConversation {
+/** The only credential these helpers need, so prove/quo.mjs can reuse them outside the Worker. */
+type QuoAuth = Pick<Env, 'QUO_API_KEY'>;
+
+export interface QuoPhoneNumber { id: string; number: string; name?: string | null }
+export interface QuoConversation {
   id: string;
   phoneNumberId: string;
   participants: string[];
@@ -37,10 +41,10 @@ interface QuoConversation {
   createdAt: string;
   lastActivityAt?: string | null;
 }
-interface QuoMessage { direction: 'incoming' | 'outgoing'; status?: string; createdAt: string; text?: string }
-interface QuoCall { direction: 'incoming' | 'outgoing'; createdAt: string; answeredAt?: string | null }
+export interface QuoMessage { direction: 'incoming' | 'outgoing'; status?: string; createdAt: string; text?: string }
+export interface QuoCall { direction: 'incoming' | 'outgoing'; createdAt: string; answeredAt?: string | null }
 
-async function quo<T>(env: Env, path: string, params: [string, string][]): Promise<{ data: T[]; nextPageToken?: string | null }> {
+async function quo<T>(env: QuoAuth, path: string, params: [string, string][]): Promise<{ data: T[]; nextPageToken?: string | null }> {
   const url = new URL(API + path);
   for (const [k, v] of params) url.searchParams.append(k, v);
   const res = await fetch(url, { headers: { Authorization: env.QUO_API_KEY } });
@@ -49,7 +53,7 @@ async function quo<T>(env: Env, path: string, params: [string, string][]): Promi
 }
 
 /** Every page of a list endpoint. */
-async function all<T>(env: Env, path: string, params: [string, string][]): Promise<T[]> {
+async function all<T>(env: QuoAuth, path: string, params: [string, string][]): Promise<T[]> {
   const out: T[] = [];
   let pageToken: string | null | undefined;
   do {
@@ -60,8 +64,10 @@ async function all<T>(env: Env, path: string, params: [string, string][]): Promi
   return out;
 }
 
+export const listPhoneNumbers = (env: QuoAuth) => all<QuoPhoneNumber>(env, 'phone-numbers', []);
+
 /** Conversations with activity at or after `since`. Pages stop once they are older (newest first). */
-async function activeConversations(env: Env, phone: string, since: number): Promise<QuoConversation[]> {
+export async function activeConversations(env: QuoAuth, phone: string, since: number): Promise<QuoConversation[]> {
   const out: QuoConversation[] = [];
   let pageToken: string | null | undefined;
   do {
@@ -83,7 +89,7 @@ async function activeConversations(env: Env, phone: string, since: number): Prom
  * was answered. An incoming call that was answered is the customer reaching
  * us and us picking up, so it is an inbound followed by contact.
  */
-function toTimeline(messages: QuoMessage[], calls: QuoCall[]): Observed[] {
+export function toTimeline(messages: QuoMessage[], calls: QuoCall[]): Observed[] {
   const timeline: Observed[] = [];
   for (const m of messages) {
     if (m.direction === 'incoming') timeline.push({ at: secs(m.createdAt), inbound: true });
@@ -98,6 +104,20 @@ function toTimeline(messages: QuoMessage[], calls: QuoCall[]): Observed[] {
     }
   }
   return timeline.sort((a, b) => a.at - b.at);
+}
+
+/** Every message and call in one conversation created after `since`, as a timeline. */
+export async function readConversation(env: QuoAuth, c: QuoConversation, since: number) {
+  const base: [string, string][] = [
+    ['phoneNumberId', c.phoneNumberId],
+    ...c.participants.map((p): [string, string] => ['participants', p]),
+    ['createdAfter', isoOf(since)],
+    ['maxResults', PAGE],
+  ];
+  const messages = await all<QuoMessage>(env, 'messages', base);
+  // The calls endpoint accepts a single participant, so group threads have no call history.
+  const calls = c.participants.length === 1 ? await all<QuoCall>(env, 'calls', base) : [];
+  return { messages, calls, timeline: toTimeline(messages, calls) };
 }
 
 export async function ingestQuo(env: Env) {
@@ -116,17 +136,7 @@ export async function ingestQuo(env: Env) {
       for (const c of await activeConversations(env, src.address, since)) {
         // One failing conversation is logged and skipped; the others still sync.
         try {
-          const base: [string, string][] = [
-            ['phoneNumberId', c.phoneNumberId],
-            ...c.participants.map((p): [string, string] => ['participants', p]),
-            ['createdAfter', isoOf(since)],
-            ['maxResults', PAGE],
-          ];
-          const messages = await all<QuoMessage>(env, 'messages', base);
-          // The calls endpoint accepts a single participant, so group threads have no call history.
-          const calls = c.participants.length === 1 ? await all<QuoCall>(env, 'calls', base) : [];
-
-          const timeline = toTimeline(messages, calls);
+          const { messages, timeline } = await readConversation(env, c, since);
           if (timeline.length) await syncConversation(env, src, c, messages, timeline, now);
           await clearFailure(env.DB, src.id, `quo:${c.id}`);
 

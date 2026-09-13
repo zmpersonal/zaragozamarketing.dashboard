@@ -75,6 +75,9 @@ export async function withQuo(account, fn) {
     if (url.origin !== 'https://api.quo.com') throw new Error('unexpected fetch in test: ' + url.href);
 
     // v1, per the docs.
+    if (url.pathname === '/v1/phone-numbers') {
+      return ok({ data: [{ id: PHONE, number: '+15125550100', formattedNumber: '(512) 555-0100', name: 'InHouse Support' }] });
+    }
     if (url.pathname === '/v1/conversations') {
       if (!q.get('maxResults')) return new Response('maxResults required', { status: 400 });
       return ok({ data: byActivity, nextPageToken: null });
