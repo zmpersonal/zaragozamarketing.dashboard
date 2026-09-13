@@ -47,19 +47,34 @@ async function authenticate(req: Request, env: Env): Promise<User | null> {
     (req.headers.get('cookie')?.match(/CF_Authorization=([^;]+)/)?.[1] ?? null);
   if (!token) return null;
 
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [rawHeader, rawPayload, rawSig] = parts;
+
+  // Anything malformed (bad base64, bad JSON) is an unauthenticated request,
+  // not a server error.
+  const b64url = (s: string) =>
+    Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+  let payload: { exp?: unknown; aud?: unknown; email?: unknown };
+  let sig: Uint8Array;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(b64url(rawPayload)));
+    sig = b64url(rawSig);
+  } catch {
+    return null;
+  }
+  if (typeof payload !== 'object' || payload === null) return null;
+
+  // exp is required: a token that never expires is not an Access token.
+  if (typeof payload.exp !== 'number' || payload.exp < now()) return null;
+  // aud may be a string or an array; either way it must match exactly.
+  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!aud.includes(env.ACCESS_AUD)) return null;
+  if (typeof payload.email !== 'string' || !payload.email.includes('@')) return null;
+
   const certs = await fetch(
     `https://${env.ACCESS_TEAM}.cloudflareaccess.com/cdn-cgi/access/certs`
   ).then((r) => r.json<{ keys: JsonWebKey[] }>());
-
-  const [rawHeader, rawPayload, rawSig] = token.split('.');
-  if (!rawSig) return null;
-
-  const b64url = (s: string) =>
-    Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
-  const payload = JSON.parse(new TextDecoder().decode(b64url(rawPayload)));
-
-  if (payload.exp < now()) return null;
-  if (!(payload.aud ?? []).includes(env.ACCESS_AUD)) return null;
 
   let verified = false;
   for (const jwk of certs.keys) {
@@ -67,13 +82,13 @@ async function authenticate(req: Request, env: Env): Promise<User | null> {
       'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']
     );
     if (await crypto.subtle.verify(
-      'RSASSA-PKCS1-v1_5', key, b64url(rawSig),
+      'RSASSA-PKCS1-v1_5', key, sig,
       new TextEncoder().encode(`${rawHeader}.${rawPayload}`)
     )) { verified = true; break; }
   }
   if (!verified) return null;
 
-  const email = String(payload.email).toLowerCase();
+  const email = payload.email.toLowerCase();
   const owners = env.OWNERS.toLowerCase().split(',').map((s) => s.trim());
   return { email, role: owners.includes(email) ? 'owner' : 'agent' };
 }
