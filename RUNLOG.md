@@ -5,6 +5,88 @@ still unproven.
 
 ---
 
+## Round 2 — correctness (2026-09-13, branch `claude/inh-round-2`, cut from `claude/inh-round-1`)
+
+Nothing was deployed, merged, pushed, or PR'd. The repo now lives at
+`~/Code/zaragozamarketing.dashboard`. The Desktop-level THI Autoposter CLAUDE.md no longer loads
+into sessions here (round-1 open question 4 is moot).
+
+Each bug was fixed test-first: write the test, watch it fail, fix, watch it pass.
+
+### What changed
+1. **Prep, `12e7e06`.** Source imports use explicit `.ts` extensions
+   (`allowImportingTsExtensions`), so Node can load `src/index.ts` and the ingest modules in
+   tests. Added `tests/helpers/d1.mjs`, which runs the real `schema.sql` on `node:sqlite` behind
+   the D1 surface the code uses. No behaviour change.
+2. **Clock, `2e2c59a`.** `businessMinutes()` hung across the March DST change. It now steps one
+   local calendar date at a time; see "Clock approach" below.
+3. **Gmail customer, `37a8523`.** The customer came from the newest message's From, which could
+   be our reply or a cc'd colleague. It now comes from the first inbound message and is refreshed
+   on every sync. Direction now uses Gmail's `SENT` label or an exact address match, replacing a
+   substring match that treated send-as alias replies as inbound. Threads with no inbound message
+   are skipped.
+4. **`awaiting_since` and reopen, `8957487`.**
+   - Added `thread.awaiting_since`.
+   - The state rules live in `src/lib/thread-state.ts`. All three ingest paths now write through
+     `src/db/threads.ts:syncThread`, whose UPDATE is conditional on the row it read.
+   - Added `rescueThread` and `POST /api/threads/:id/rescue`.
+   - Board, queue and UI ages now use `awaiting_since`. Closing via actions nulls it.
+   - Updated the `schema.sql` index and comments.
+5. **Quo webhook, `642c7b4`.** `/hooks/quo` verifies the `openphone-signature` HMAC as described
+   in Quo's docs (support.quo.com/core-concepts/integrations/webhooks), with a 5-minute replay
+   window. It returns 401 otherwise, and fails closed without `QUO_WEBHOOK_SECRET`. The new
+   secret name is added to `wrangler.toml` comments.
+6. **Docs.** CLAUDE.md invariants rewritten (now 9), plus this entry and HANDOFF.
+
+### Clock approach
+- **The old loop's cursor was an instant.** It stepped `dayStart + 26h`, then snapped back by the
+  wall-clock minute of day. On 2027-03-14, 02:00 local doesn't exist, so from Sat 00:00 CST the
+  overshoot lands Sun 03:00 CDT. The snap-back subtracts 3 real hours and lands on Sat 23:00, so
+  the cursor never leaves Saturday.
+- **The new cursor is a local calendar date,** advanced with `Date.UTC(y, m-1, d+1)`. That is
+  pure calendar arithmetic, with no time zone and no DST, so each iteration is exactly one local
+  day however many seconds it holds. There is no loop counter or cap: termination follows from
+  the date strictly increasing until its local midnight reaches `to`.
+- **Instants are resolved per day.** A two-pass offset lookup turns that day's 00:00, 08:00 and
+  17:00 wall times into instants. Those times always exist in Chicago, whose changes happen at
+  02:00. The weekday comes from the calendar date, not the zone.
+- **Minor fixes in the same change:** `hourCycle: 'h23'` replaces `hour12: false`, and seconds
+  are carried.
+
+### What was proved (failing first, then passing)
+
+| Bug | Before fix | After fix |
+|---|---|---|
+| 1 clock | 7 tests: 5 pass, **2 fail**. March crossing and the 21-week span both hit `did not return within 3000ms`; November passed. | 7/7 |
+| 2 customer | 4 tests: **0 pass, 4 fail**. Stored `'InHouse Support'`, `support@inhousewellness.com`, `'Sam Ortiz'` (cc'd colleague), `julian@inhousewellness.com` (alias). | 4/4 |
+| 3 awaiting/reopen/rescue | 11: **0 pass, 11 fail**. 10 on assertions (`awaiting_since` undefined; closed stayed `'closed'`); `rescue.test.mjs` failed to load, since `src/db/threads.ts` didn't exist. | 16/16, with reopen-hold and mid-sync race tests added |
+| 4 webhook | 9 tests: 2 pass (valid signatures), **7 fail** with `200 !== 401` | 9/9 |
+
+- **Totals:** 40 tests, 40 pass, 0 fail. `npm run check` and `npm run build` are clean.
+- **Deliberate breaks, run in scratch copies (the repo was never modified):**
+  - Bug 3: 13 breaks, all caught by their target test. Among them: rescue moving either
+    timestamp, `responseMinutes` falling back to `first_inbound_at`, no reopen, a closed-at-style
+    cutoff, reopen over the whole thread, no hold, unprotected blocked, newest-unanswered, UPDATE
+    moving `first_inbound_at`, unconditional UPDATE, reopen unlogged, and always-reopen.
+    Controls passed 31/31, then 40/40.
+  - Bug 4: 8 breaks, all caught (replay window, compact form, raw key bytes, timestamp binding,
+    always-true, fail-open).
+  - One timestamp break was initially a no-op on my side. It was redone correctly and was caught.
+- **Clock oracle:** 320 random spans around both DST changes, year-end and midsummer, compared
+  against a brute-force 10-minute `isOpen` count. 0 mismatches.
+- **UI:** `public/index.html` rendered with no console errors. Ages come from `awaiting_since`,
+  and threads not awaiting us show "—" and sort last.
+
+### Still unproven
+- The Quo signature against a real delivery. The docs' Node and Python samples disagree on key
+  encoding; see HANDOFF.
+- D1 itself: tests run on `node:sqlite`.
+- The HTTP routes behind Access (actions close → `awaiting_since` NULL, `/rescue`). There's no
+  JWT test harness yet.
+- Everything that needs credentials (Gmail, Quo, OAuth), as in round 1.
+
+---
+
 ## Round 1 — foundations (2026-09-13, branch `claude/inh-round-1`)
 
 Nothing was deployed, merged, pushed, or PR'd.
