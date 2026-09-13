@@ -68,6 +68,11 @@ produces a second measurement.
 ## Ingest
 
 - **Gmail** (`src/ingest/gmail.ts`):
+  - Authenticates with one Google service account using domain-wide delegation. It
+    impersonates each mailbox, with scope `gmail.readonly` only (`src/lib/google-auth.ts`).
+    There are no refresh tokens.
+  - The Worker reads the key JSON from the `GOOGLE_SERVICE_ACCOUNT_JSON` secret; Workers have no
+    filesystem.
   - Reads the last 30 days of inbox threads per mailbox.
   - The customer is the sender of the first inbound message. Our replies are identified by
     Gmail's `SENT` label.
@@ -96,9 +101,7 @@ npx wrangler login
 npx wrangler d1 create inhouse-ops          # paste the id into wrangler.toml
 npx wrangler d1 execute inhouse-ops --file=./schema.sql --remote
 
-npx wrangler secret put GOOGLE_CLIENT_ID
-npx wrangler secret put GOOGLE_CLIENT_SECRET
-npx wrangler secret put GOOGLE_REFRESH_TOKENS   # {"support@inhousewellness.com":"1//0..."}
+npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON < /path/outside/the/repo/key.json
 npx wrangler secret put QUO_API_KEY
 npx wrangler secret put QUO_WEBHOOK_SECRET      # whsec_... from POST https://api.quo.com/webhooks
                                                  # with header Quo-Api-Version: 2026-03-30
@@ -162,8 +165,14 @@ node prove/triage.mjs support@inhousewellness.com    # read this one carefully
   2. Newsletters in KEPT are annoying, not dangerous. That's the side we err toward.
   3. If a demote reason looks wrong, the rule is wrong, not the email.
 
-Credentials come from the shell or `.dev.vars` (gitignored). Watch for a trailing `=` lost
-when copying a secret.
+Credentials come from the shell or `.dev.vars` (gitignored):
+- **Gmail scripts** need `GOOGLE_SERVICE_ACCOUNT_FILE`, the path to the service-account key.
+  Keep the key outside the repo; it is never printed.
+- **The Quo script** needs `QUO_API_KEY`. Watch for a trailing `=` lost when copying it.
+
+```bash
+GOOGLE_SERVICE_ACCOUNT_FILE=~/Code/secrets/<key>.json node prove/triage.mjs support@inhousewellness.com
+```
 
 ## Looking at the UI now
 

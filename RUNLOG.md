@@ -5,6 +5,90 @@ still unproven.
 
 ---
 
+## Round 4 — real data (2026-09-13, branch `claude/inh-round-4`, cut from `claude/inh-round-3`)
+
+Nothing was deployed, merged, pushed, or PR'd. Every change was done test-first.
+
+### Part A — what changed
+
+1. **`844e746` — the agent's status is authoritative.**
+   - Contact always stamps `last_outbound_at`, but only `answered` or `closed` clears
+     `awaiting_since`.
+   - Ingest counts a stored contact as a reply only when the clock was cleared. Otherwise the
+     next sync would have silently stopped a voicemail's clock.
+   - 3 round-3 tests were rewritten to the new rule.
+2. **`9ef02fa` — a customer chasing a blocked thread moves it back to waiting.**
+   - `awaiting_since` is set, `blocked_since` is cleared, and `blocked_on` / `blocked_note` are
+     kept.
+   - A `system` / `unblocked` action is logged.
+3. **`6771a54` — an append-only `response` table,** with UNIQUE(`thread_id`, `awaiting_since`).
+   - Ingest records every completed wait, including ones between syncs.
+   - The route records a wait when the agent stops the clock (`via` = `replied`, `called` or
+     `closed`).
+   - Why a table: a column loses the first measurement when a thread reopens.
+4. **`73a1f46` — `ingest_failure` table.**
+   - A Quo conversation is skipped after 3 consecutive failures, so the cursor moves on. A
+     success clears the row.
+   - Gmail threads are recorded too.
+   - `GET /api/board` returns `ingest_failures`.
+5. **`01d55bf` — `prove/quo.mjs`** uses `/v1/phone-numbers` plus the exported ingest helpers
+   and `resolveState`.
+6. **`92eb471` — README** rewritten to match the code.
+
+### Part A — failing first, then passing
+
+| Item | Before | After |
+|---|---|---|
+| A1 status authority | 12 tests, **5 fail**: voicemail and no-status → `answered`; blocked-call cleared the clock; pure rules stopped an unresolved clock | 12/12 |
+| A2 unblock | 21 tests in 3 files, **3 fail**: `'blocked' !== 'waiting'` | 21/21 (+1 guard) |
+| A3 response time | 10 tests: first 10 fail (no table); with the table, **9 fail** on behaviour (1 vacuous) | 12/12 (+ close-then-reopen, UNIQUE safety net) |
+| A4 poison pill | 4 tests, **4 fail**. Scratch demo on old code: 5 polls, `sync_cursor` stayed null, the full 30-day window re-read every time | 4/4 |
+| A5 `prove/quo.mjs` | 3 tests (real CLI in a child process against the fake v1 API), **2 fail**: `unexpected fetch https://api.quo.com/phone-numbers` | 3/3 |
+| A6 README | docs, no test | — |
+
+- **Part A totals:** 109 tests pass, 0 fail. Check and build are clean.
+- **Deliberate breaks:** A1 6, A2 6, A3 13, A4 8, A5 2 = **35 caught**.
+  - One A3 break (no UNIQUE) was initially missed: no current path produces a duplicate. A
+    direct safety-net test now pins it.
+
+### Part B — Gmail on a service account, and the real triage run
+
+- **`87a018a` — `src/lib/google-auth.ts`.**
+  - An RS256 JWT signed with WebCrypto, impersonating the mailbox, `gmail.readonly` only,
+    exchanged via the JWT-bearer grant.
+  - Tokens are cached per subject. Errors never carry the key or the assertion.
+  - Gmail ingest uses the `GOOGLE_SERVICE_ACCOUNT_JSON` secret (Workers have no filesystem).
+  - Refresh-token env vars were removed. `.gitignore` now covers key files.
+  - Tests: 7 failed first (module missing), +1 after a break exposed a gap. 14 breaks caught.
+- **`c8769bc` — the prove scripts** (`prove/triage.mjs`, `prove/gmail.mjs`) read the key via
+  `GOOGLE_SERVICE_ACCOUNT_FILE` (`prove/_google.mjs`).
+  - `prove/oauth-bootstrap.mjs` was removed.
+  - 3 CLI tests failed first (the scripts demanded refresh tokens). 4 breaks caught.
+  - Fixed the secret-hygiene test, which `87a018a` had committed while failing: it was run
+    before `git add`. 2 leak breaks caught (the first attempt was mis-built, and redone).
+- **`cb49d3b` — the first real run crashed** (`full.payload.headers is not iterable`).
+  - The script sent `metadataHeaders` comma-joined, which Gmail reads as one header name.
+    Verified on real mail by header counts only.
+  - Fixed to send repeated parameters. The fake Gmail now mirrors the real behaviour and
+    reproduced the crash first. 1 break caught.
+  - No triage rule changed.
+- **Real run:** `prove/triage.mjs support@inhousewellness.com`, 30 days: exit 0.
+  - 46 messages: 30 kept (1.0/day), 16 demoted (0.5/day), 47 exempt senders.
+  - The key was never printed; outputs were scanned for key material. Findings are in HANDOFF.
+
+**Round totals:**
+- 119 tests, 119 pass, 0 fail. Check and build are clean.
+- 56 deliberate breaks caught: 35 in Part A, 21 in Part B.
+
+### Still unproven
+- The Worker's service-account path on Cloudflare.
+- Delegation for other mailboxes.
+- The Quo webhook against a real delivery.
+- Quo v1 behaviour against the real API.
+- D1 itself.
+
+---
+
 ## Round 3 — correctness, part two (2026-09-13, branch `claude/inh-round-3`, cut from `claude/inh-round-2`)
 
 Nothing was deployed, merged, pushed, or PR'd. Every item was done test-first: write the test,

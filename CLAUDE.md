@@ -38,10 +38,19 @@ the round asks for one. Don't run `wrangler deploy` (except the `--dry-run` in `
 - Local secrets go in `.dev.vars`, which is gitignored along with `.env`, `.wrangler/` and `node_modules/`.
 - Production secrets are set with `wrangler secret put NAME`. `wrangler.toml` lists secret
   *names* only, never values.
-- The secrets are `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKENS` (a JSON map
-  of mailbox → token), `QUO_API_KEY` and `QUO_WEBHOOK_SECRET`.
-- Refresh tokens printed by `prove/oauth-bootstrap.mjs` must never be pasted into chat, a
-  commit, or any file that isn't gitignored.
+- The Worker secrets are `GOOGLE_SERVICE_ACCOUNT_JSON`, `QUO_API_KEY` and `QUO_WEBHOOK_SECRET`.
+  - `GOOGLE_SERVICE_ACCOUNT_JSON` is the service-account key's JSON (domain-wide delegation,
+    `gmail.readonly`).
+  - There are no refresh tokens.
+- **The Gmail service-account key never enters the repo.**
+  - Locally it lives outside the repo, and scripts read it only through the path in
+    `GOOGLE_SERVICE_ACCOUNT_FILE`.
+  - Never copy it into the repo, print it, log it, or commit it. `.gitignore` covers
+    `secrets/`, `*.pem`, `*service-account*.json` and `inhouse-ops-*.json`.
+  - Code that handles the key (`src/lib/google-auth.ts`, `prove/_google.mjs`) reports errors
+    by variable name, path and Google's error code only.
+  - `tests/google-auth.test.mjs` fails if any tracked file contains PEM key material or
+    service-account JSON.
 
 ### 3. `thread.conversation_started_at` is when the conversation began, and never moves
 It is written on INSERT only and never updated, by ingest, a rescue, a reopen, or any action.
@@ -65,14 +74,26 @@ never from `conversation_started_at`. The rules live once, in `src/lib/thread-st
     the thread.
 - **Closed with nothing new:** stays `closed`, with `awaiting_since` NULL. Closing through
   `POST /api/actions` also sets it NULL.
-- **Logged contact is a reply:** an action of kind `replied` or `called` (`POST /api/actions`)
-  sets `last_outbound_at` to now, clears `awaiting_since`, and moves a `waiting` thread to
-  `answered`. That includes a call logged with "still needs a reply". Other kinds never touch
-  `last_outbound_at`.
-- **Ingest never resurrects `waiting` while `last_outbound_at` is newer than the newest inbound
-  message.** `resolveState()` counts the stored `last_outbound_at` as an outbound event, so a call
-  the provider never saw still counts as a reply. Tests: `tests/contact-actions.test.mjs` (the
-  round trip through the route and a real sync) and `tests/thread-state.test.mjs`.
+- **The agent's chosen status is authoritative.**
+  - An action of kind `replied` or `called` (`POST /api/actions`) always sets
+    `last_outbound_at` (contact).
+  - It clears `awaiting_since` **only** if the agent chose `answered` or `closed`. A voicemail
+    logged as "still needs a reply" keeps the clock running.
+  - Other kinds never touch `last_outbound_at`.
+- **Ingest respects that.** A stored contact counts as an outbound event only when the agent
+  resolved it (`awaiting_since` is NULL). So ingest never resurrects `waiting` from an inbound
+  that a resolved contact already answered, and never stops a clock the agent left running.
+  Tests: `tests/contact-actions.test.mjs`, `tests/thread-state.test.mjs`.
+- **Every wait that ends is measured**, in the append-only `response` table: `awaiting_since`,
+  `responded_at`, `business_minutes`, `via`, `actor`, and UNIQUE(`thread_id`, `awaiting_since`).
+  - It's a table, not a column, because a column would lose the first measurement when a
+    thread reopens.
+  - **Ingest** records every open wait followed by an outbound (`completedWaits()`), including
+    waits that began and ended between syncs. `via` is `message`, stamped with the reply's own
+    time.
+  - **The actions route** records a wait when the agent stops the clock. `via` is `replied` or
+    `called`, or `closed` for a close without contact (not a reply).
+  - Tests: `tests/response.test.mjs`.
 - **Held until we reply:** once set, `awaiting_since` holds until an outbound is seen after it,
   including a logged contact. A reopened thread can't slide back to a pre-close message on the
   next sync.
@@ -120,15 +141,22 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
     to change before the admin report exists.
 
 ### 7. Ingest never overwrites a status a human set
-- **`blocked`** always stays blocked. The clock (`awaiting_since`) still runs.
+- **`blocked`** stays blocked while nothing new arrives. The clock (`awaiting_since`) still runs.
+  - **A new inbound** (newer than the stored `last_inbound_at`) means the customer is chasing
+    us. The thread leaves `blocked` for `waiting` (or `answered`, if we already replied since)
+    and gets `awaiting_since`.
+  - Its `blocked_since` is cleared, so it leaves the blocked group, but `blocked_on` and
+    `blocked_note` are kept as context.
+  - A `system` / `unblocked` action records it.
   - `blocked_since` is set by `POST /api/actions` on the move to `blocked`, kept while the thread
-    stays blocked (re-saving doesn't reset it), and cleared when it leaves. Ingest never writes
-    it.
+    stays blocked (re-saving doesn't reset it), and cleared when it leaves. Ingest writes it
+    only to clear it when a chasing inbound unblocks the thread.
   - `/api/queue` lists waiting threads first (by `awaiting_since`), then blocked threads (by
     `blocked_since`), with priority ordering within each group. The UI shows "blocked 6d".
     Tests: `tests/blocked-since.test.mjs`.
 - **`closed`** stays closed unless a new inbound message arrives, which reopens it (invariant 4).
-  That is the only automatic change to a human-set status.
+  Reopening a closed thread and unblocking a chased blocked thread are the only automatic
+  changes to a human-set status.
 - `answered` and `waiting` are **not** protected. Ingest recomputes them from the timeline.
 - **Enforced today:** `resolveState()` applies these rules. `syncThread()`'s UPDATE is also
   conditional on the status, `awaiting_since`, `last_inbound_at` and `last_outbound_at` it read.
@@ -138,13 +166,21 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
 - Any new ingest source must go through `syncThread()`.
 - **One bad item never stops a source.**
   - Gmail wraps each thread, and Quo wraps each conversation, in its own `try/catch`. A failure
-    is logged with the item's id and skipped, and the rest of the batch syncs. Tests:
-    `tests/ingest-isolation.test.mjs`, `tests/quo-ingest.test.mjs`.
+    is logged with the item's id and skipped, and the rest of the batch syncs.
+  - Every failure is recorded in `ingest_failure` (consecutive count, last error). A successful
+    sync deletes the row.
+  - A Quo conversation holds the cursor for retry until its 3rd consecutive failure, then is
+    marked `skipped_at` and the cursor moves past it. A poison record can never stop phone
+    ingest.
+  - `GET /api/board` returns `ingest_failures`.
+  - Tests: `tests/ingest-isolation.test.mjs`, `tests/quo-ingest.test.mjs`,
+    `tests/poison-pill.test.mjs`.
 - **Every Quo inbound is observed.**
   - Quo polling reads individual messages and calls created after `source.sync_cursor`, never
     just a conversation's latest activity.
-  - The cursor advances only when every conversation synced.
+  - The cursor advances unless a conversation failed and is still being retried.
   - The webhook is the fast path; polling is the backstop.
+  - `prove/quo.mjs` uses the same exported helpers.
 
 ### 8. Agents are identified individually
 Never by a shared or rotating login.
@@ -177,17 +213,19 @@ over the raw body before trusting it (`src/lib/quo-signature.ts`).
 
 ```
 src/index.ts              Worker: auth (Access JWT), /api routes, /hooks/quo, cron → ingest
-src/ingest/gmail.ts       Gmail threads → timeline → syncThread (customer = first inbound sender)
+src/ingest/gmail.ts       Gmail threads (service-account auth) → timeline → syncThread (customer = first inbound sender)
 src/ingest/quo.ts         Quo v1 messages + calls since source.sync_cursor → syncThread
 src/ingest/chat.ts        provider-agnostic chat → syncThread (not routed yet)
-src/db/threads.ts         syncThread (conditional write), rescueThread
+src/db/threads.ts         syncThread (conditional write), rescueThread, responseInsert
+src/db/failures.ts        ingest_failure: recordFailure / clearFailure / listFailures (skip after 3)
+src/lib/google-auth.ts    service-account JWT (domain-wide delegation) → Gmail access token
 src/lib/thread-state.ts   status / awaiting_since / reopen rules, responseMinutes (pure)
 src/lib/triage.ts         demotion rules (pure)
 src/lib/clock.ts          business-minutes clock (pure)
 src/lib/quo-signature.ts  Quo webhook verification (Standard Webhooks)
 schema.sql                D1 schema + brand seed
 public/index.html         UI, mock data until USE_API = true
-prove/*.mjs               run-by-hand source proofs; need real credentials
+prove/*.mjs               run-by-hand source proofs; need real credentials (Gmail: GOOGLE_SERVICE_ACCOUNT_FILE)
 tests/*.test.mjs          node:test suites; tests/helpers has the D1 shim, fake Gmail, fake
                           Quo v1 API, and an Access JWT minter
 ```
