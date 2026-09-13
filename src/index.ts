@@ -132,7 +132,7 @@ async function queue(env: Env, user: User, mine: boolean) {
     SELECT t.id, t.brand_id, t.channel, t.subject, t.customer_name,
            t.customer_handle, t.preview, t.status, t.blocked_on, t.blocked_note,
            t.assignee, t.priority, t.conversation_started_at, t.last_inbound_at,
-           t.awaiting_since, t.blocked_since, t.is_automated
+           t.awaiting_since, t.blocked_since, t.is_automated, t.triage, t.triage_signals
     FROM thread t
     WHERE t.status IN ('waiting','blocked')
       ${mine ? 'AND (t.assignee = ?1 OR t.assignee IS NULL)' : ''}

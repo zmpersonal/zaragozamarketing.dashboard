@@ -160,6 +160,25 @@
     border-radius: 20px; border: 1px solid currentColor;
   }
 
+  /* ---------- queue sections: needs reply / probably not customers / spam ---------- */
+  .queue-section + .queue-section { margin-top: 22px; }
+  .section-title { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--pine); }
+  .section-title.section-bulk, .section-title.section-spam { color: var(--steam); }
+  .section-empty { margin: 0; font-size: 12.5px; color: var(--steam); }
+  .chip.reason { color: var(--steam); margin: 1px 0; }
+
+  /* Spam: always expanded, one plain line per message. Sender and the whole
+     subject stay readable so a human can spot the real customer Gmail misfiled. */
+  .spam-list { list-style: none; margin: 0; padding: 0; background: var(--surface);
+               border: 1px solid var(--line); border-radius: var(--radius); }
+  .spam-row { display: grid; grid-template-columns: 70px minmax(180px, 280px) minmax(0, 1fr);
+              gap: 12px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+  .spam-row + .spam-row { border-top: 1px solid #eef2f1; }
+  .spam-row:hover, .spam-row:focus-visible { background: #f2f6f5; outline: none; }
+  .spam-age { color: var(--steam); }
+  .spam-from { color: var(--pine); overflow-wrap: anywhere; }
+  .spam-subject { color: var(--pine); overflow-wrap: anywhere; }
+
   .empty {
     background: var(--surface); border: 1px dashed var(--line);
     border-radius: var(--radius); padding: 34px; text-align: center; color: var(--steam);
@@ -221,6 +240,7 @@
     .rail nav { flex-direction: row; }
     .rail .heading, .rail .who { display: none; }
     .row { grid-template-columns: 4px 92px minmax(0,1fr) 90px; }
+    .spam-row { grid-template-columns: 1fr; gap: 2px; }
     .row .who { display: none; }
   }
   @media (prefers-reduced-motion: no-preference) {
@@ -272,13 +292,15 @@
       <button data-f="overdue" aria-pressed="false">Over 24h</button>
     </div>
 
-    <div class="queue" id="queue"></div>
+    <div id="queue"></div>
   </main>
 
   <aside class="panel" id="panel"></aside>
 </div>
 
 <script type="module">
+import { sectionThreads, renderSection } from './queue-sections.mjs';
+
 // ---------------------------------------------------------------
 // Mock data. Delete MOCK and flip USE_API once D1 is seeded —
 // every fetch below already points at the real Worker routes.
@@ -320,6 +342,21 @@ const MOCK = {
       customer_name: 'Rosa Lim', customer_handle: '+1 737 555 0198', status: 'blocked', blocked_on: 'shipping',
       blocked_note: 'Carrier claim filed, waiting on their inspection.',
       assignee: null, conversation_started_at: h(63), awaiting_since: null, blocked_since: h(6 * 24), preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
+    { id: 'gmail:5', brand_id: 'inhouse', channel: 'email', subject: 'PROMOTIONS + UPDATED INVENTORY 9-11-2026',
+      customer_name: 'Golden Designs', customer_handle: 'daniel@goldendesignsinc.com', status: 'waiting', assignee: null,
+      conversation_started_at: h(30), awaiting_since: h(30), triage: 'bulk',
+      triage_signals: JSON.stringify([{ code: 'list_unsubscribe', why: 'has a List-Unsubscribe header' }, { code: 'gmail_promo', why: 'Gmail filed it under Promotions' }]),
+      preview: 'New arrivals and clearance pricing.' },
+    { id: 'gmail:6', brand_id: 'inhouse', channel: 'email', subject: 'Refund Request – Order #467740987 for the heater I returned last week',
+      customer_name: 'Accounts', customer_handle: 'admin@refund-desk.example', status: 'waiting', assignee: null,
+      conversation_started_at: h(20), awaiting_since: h(20), triage: 'spam',
+      triage_signals: JSON.stringify([{ code: 'gmail_spam', why: 'Gmail marked it as spam' }]),
+      preview: 'Please process my refund.' },
+    { id: 'gmail:7', brand_id: 'inhouse', channel: 'email', subject: 'Get 5★ Reviews from old Accounts — 100% Satisfaction Guaranteed',
+      customer_name: 'Steven', customer_handle: 'sender5@example.com', status: 'waiting', assignee: null,
+      conversation_started_at: h(50), awaiting_since: h(50), triage: 'spam',
+      triage_signals: JSON.stringify([{ code: 'gmail_spam', why: 'Gmail marked it as spam' }]),
+      preview: '' },
   ],
   actions: {
     'gmail:2': [
@@ -474,31 +511,13 @@ function renderQueue() {
     return;
   }
 
-  for (const t of rows) {
-    const hrs = since(t) == null ? 0 : ageHours(since(t));
-    const el = document.createElement('button');
-    el.className = 'row';
-    el.setAttribute('aria-selected', String(state.selected === t.id));
-    el.innerHTML =
-      '<span class="edge" style="background:' + heatColor(hrs) + '"></span>' +
-      '<span class="age num" style="color:' + heatColor(hrs) + '">' +
-        ageText(t) + '</span>' +
-      '<span class="body">' +
-        '<span class="subject">' + esc(t.subject) + '</span><br>' +
-        '<span class="from">' + esc(t.customer_name ?? t.customer_handle ?? '') +
-          ' · ' + brandName(t.brand_id) + '</span>' +
-      '</span>' +
-      '<span class="meta">' +
-        (t.status === 'blocked'
-          ? '<span class="chip" style="color:var(--ember)">blocked: ' + esc(t.blocked_on) + '</span>'
-          : t.is_automated
-            ? '<span class="chip" style="color:var(--plunge)">bot handled</span>'
-            : esc(t.channel)) +
-      '</span>' +
-      '<span class="who">' + (t.assignee ? esc(t.assignee.split('@')[0]) : 'unassigned') + '</span>';
-    el.onclick = () => { state.selected = t.id; render(); };
-    wrap.append(el);
-  }
+  // Three sections, nothing hidden: needs reply, probably not customers, spam (always expanded).
+  wrap.innerHTML = sectionThreads(rows).map((section) => renderSection(section, esc, {
+    ageText,
+    color: (t) => heatColor(since(t) == null ? 0 : ageHours(since(t))),
+    brandName,
+    selected: state.selected,
+  })).join('');
 }
 
 function renderPanel() {
@@ -659,6 +678,16 @@ function render() {
   for (const b of document.querySelectorAll('#filters button'))
     b.setAttribute('aria-pressed', String(b.dataset.f === state.filter));
 }
+
+const queueEl = document.getElementById('queue');
+const openThread = (e) => {
+  const el = e.target.closest('[data-thread]');
+  if (!el) return;
+  state.selected = el.dataset.thread;
+  render();
+};
+queueEl.onclick = openThread;
+queueEl.onkeydown = (e) => { if (e.key === 'Enter') openThread(e); };
 
 document.getElementById('views').onclick = (e) => {
   const b = e.target.closest('button');
