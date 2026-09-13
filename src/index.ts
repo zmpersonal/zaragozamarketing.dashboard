@@ -9,6 +9,7 @@
 import { ingestGmail } from './ingest/gmail.ts';
 import { ingestQuo } from './ingest/quo.ts';
 import { rescueThread } from './db/threads.ts';
+import { SIGNATURE_HEADER, verifyQuoSignature } from './lib/quo-signature.ts';
 
 export interface Env {
   DB: D1Database;
@@ -19,6 +20,7 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   GOOGLE_REFRESH_TOKENS: string; // JSON: { "support@inhousewellness.com": "1//0..." }
   QUO_API_KEY: string;
+  QUO_WEBHOOK_SECRET: string;    // base64 signing secret from the Quo webhook's details page
   ASSETS: Fetcher;
 }
 
@@ -251,9 +253,32 @@ export default {
   },
 };
 
+/**
+ * Public endpoint: nothing in the body is trusted until Quo's HMAC signature
+ * over it verifies (lib/quo-signature.ts). Anything else gets a 401. Fails
+ * closed if the signing secret is not configured.
+ */
 async function handleQuoWebhook(req: Request, env: Env): Promise<Response> {
-  // TODO round 2: verify the Quo signature header before trusting the body.
-  const event = await req.json<any>();
+  if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+
+  // Read the raw text once: the signature covers these exact bytes.
+  const raw = await req.text();
+
+  if (!env.QUO_WEBHOOK_SECRET) {
+    console.error('QUO_WEBHOOK_SECRET is not set; rejecting Quo webhook');
+    return json({ error: 'Invalid signature' }, 401);
+  }
+  const verified = await verifyQuoSignature(
+    req.headers.get(SIGNATURE_HEADER), raw, env.QUO_WEBHOOK_SECRET, Date.now(),
+  );
+  if (!verified) return json({ error: 'Invalid signature' }, 401);
+
+  let event: { type?: string };
+  try {
+    event = JSON.parse(raw);
+  } catch {
+    return json({ error: 'Body is not JSON' }, 400);
+  }
   console.log('quo webhook', event.type);
   return json({ ok: true });
 }

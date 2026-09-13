@@ -25,3 +25,4 @@ OWNERS      = "you@inhousewellness.com"
 #   GOOGLE_CLIENT_SECRET
 #   GOOGLE_REFRESH_TOKENS
 #   QUO_API_KEY
+#   QUO_WEBHOOK_SECRET      (Quo webhook details page -> Reveal Signing Secret)
