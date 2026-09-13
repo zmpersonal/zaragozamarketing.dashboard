@@ -112,13 +112,25 @@ test('the no-reply rule only reads the local part, not the domain', () => {
   assert.deepEqual(codes(v), []);
 });
 
-test('prove/triage.mjs uses the same no-reply pattern as src/lib/triage.ts', async () => {
-  const { readFileSync } = await import('node:fs');
-  const grab = (file) => {
-    const text = readFileSync(new URL('../' + file, import.meta.url), 'utf8');
-    const m = text.match(/const NOREPLY = (\/.+\/[a-z]*);/);
-    assert.ok(m, `${file} defines const NOREPLY = /.../`);
-    return m[1];
-  };
-  assert.equal(grab('prove/triage.mjs'), grab('src/lib/triage.ts'));
+test('prove/_triage-rules.mjs classifies exactly like src/lib/triage.ts (tier, score, reasons)', async () => {
+  const { classify: proveClassify } = await import('../prove/_triage-rules.mjs');
+  const { knownCustomerSet } = await import('../src/lib/known-customers.ts');
+  const senders = ['Dana <dana@example.com>', 'News <news@brand.example>', 'Cal <no-reply-calendar@google.com>',
+    'TF <testflight_no_reply@email.apple.com>', 'Noah <noah.replyman@example.com>', 'Priya <priya@acme.example>',
+    'A Customer <verified.customer@example.com>'];
+  const headerSets = [{}, { 'list-unsubscribe': '<mailto:u@x>' }, { 'list-id': '<x.list>' }, { precedence: 'bulk' },
+    { 'auto-submitted': 'auto-generated' }, { 'x-mailer': 'Klaviyo' }, { 'list-id': '<x>', precedence: 'list' }];
+  const labelSets = [[], ['INBOX'], ['SPAM'], ['CATEGORY_PROMOTIONS'], ['CATEGORY_SOCIAL'], ['SPAM', 'CATEGORY_PROMOTIONS'], ['CATEGORY_UPDATES']];
+  const everRepliedTo = new Set(['priya@acme.example']);
+  const knownCustomers = knownCustomerSet();
+  let n = 0;
+  for (const from of senders) for (const headers of headerSets) for (const labelIds of labelSets) {
+    const m = { from, subject: 's', headers, labelIds };
+    const a = classify(m, { everRepliedTo, markedReal: new Set(), markedSpam: new Set(), knownCustomers });
+    const b = proveClassify(m, { everRepliedTo, knownCustomers });
+    const shape = (v) => ({ tier: v.tier, score: v.score, codes: v.signals.map((x) => x.code) });
+    assert.deepEqual(shape(b), shape(a), `${from} ${JSON.stringify(headers)} ${labelIds}`);
+    n++;
+  }
+  assert.equal(n, senders.length * headerSets.length * labelSets.length);
 });

@@ -20,6 +20,8 @@ const mail = {
   'm-spam':     { labelIds: ['SPAM'], at: now - 4 * day, headers: [h('From', 'Prize Desk <win@prize.example>'), h('Subject', 'You have won')] },
   'm-trash':    { labelIds: ['TRASH'], at: now - 5 * day, headers: [h('From', 'Google Calendar <no-reply-calendar@google.com>'), h('Subject', 'Invitation: supplier call')] },
   'm-priya':    { labelIds: ['CATEGORY_UPDATES'], at: now - 6 * day, headers: [h('From', 'Priya Raman <priya@acme.example>'), h('Subject', 'Invoice 2214'), h('List-Unsubscribe', '<https://acme.example/u>')] },
+  'm-known':    { labelIds: ['SPAM'], at: now - 7 * day, headers: [h('From', 'A Customer <verified.customer@example.com>'), h('Subject', 'Track A Shipment - Priority1 for A Customer')] },
+  'm-spambulk': { labelIds: ['SPAM', 'CATEGORY_PROMOTIONS'], at: now - 8 * day, headers: [h('From', 'Deals <deals@spammy.example>'), h('Subject', 'Huge sale'), h('List-Unsubscribe', '<mailto:u@spammy.example>')] },
   'm-old':      { labelIds: ['INBOX'], at: now - 40 * day, headers: [h('From', 'Old Customer <old@example.com>'), h('Subject', 'Outside the window')] },
   'm-sent':     { labelIds: ['SENT'], at: now - 1 * day, headers: [h('From', 'InHouse <support@inhousewellness.com>'), h('Subject', 'Re: heater'), h('To', 'Dana Reyes <dana@example.com>')] },
   'm-draft':    { labelIds: ['DRAFT'], at: now - 1 * day, headers: [h('From', 'InHouse <support@inhousewellness.com>'), h('Subject', 'draft')] },

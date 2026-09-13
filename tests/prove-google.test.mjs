@@ -37,47 +37,49 @@ const noSecrets = (r) => {
   assert.ok(!out.includes(SERVICE_ACCOUNT.private_key_id), 'key id not printed');
 };
 
-test('prove/triage.mjs samples ALL received mail in the window and prints the requested shape', () => {
+test('prove/triage.mjs samples ALL received mail and prints three tiers in the requested shape', () => {
   const r = run('prove/triage.mjs');
   assert.equal(r.status, 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
   assert.ok(r.tokens.length > 0 && r.tokens.every((t) => t.ok && t.claims.sub === MAILBOX && t.claims.scope === GMAIL_READONLY), JSON.stringify(r.tokens));
 
   const lines = r.stdout.split('\n');
-  // Population first, so it can be sanity-checked before any verdict.
-  assert.equal(lines.find((l) => l.startsWith('TOTAL:')), 'TOTAL: 6 messages, 3 kept, 3 demoted');
-  assert.equal(lines.find((l) => l.startsWith('QUERY:')), 'QUERY: in:anywhere newer_than:30d -in:sent -in:drafts -in:chats');
-  assert.ok(lines.indexOf(lines.find((l) => l.startsWith('TOTAL:'))) < lines.findIndex((l) => l.startsWith('DEMOTED')), 'TOTAL before the lists');
+  assert.equal(lines[0], 'TOTAL: 8 messages, 4 customer, 2 bulk, 2 spam');
+  assert.equal(lines[1], 'QUERY: in:anywhere newer_than:30d -in:sent -in:drafts -in:chats');
 
   const section = (title) => {
-    const start = lines.findIndex((l) => l.startsWith(title));
-    assert.ok(start >= 0, title);
+    const start = lines.indexOf(title);
+    assert.ok(start >= 0, `missing header: ${title}`);
     const out = [];
     for (const l of lines.slice(start + 1)) { if (!l.trim()) break; out.push(l); }
     return out;
   };
+  const order = ['SPAM (all, one line each):', 'BULK (all, one line each):', 'CUSTOMER (all, one line each):'].map((x) => lines.indexOf(x));
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'SPAM, then BULK, then CUSTOMER');
+
   const day = (msAgo) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date(Date.now() - msAgo));
   const D = 86400_000;
-
-  // Spam, trash and a filtered label are part of the stream; one line each: date | sender | subject | reasons.
-  assert.deepEqual(section('DEMOTED'), [
+  assert.deepEqual(section('SPAM (all, one line each):'), [
+    `${day(4 * D)} | win@prize.example | You have won`,
+    `${day(8 * D)} | deals@spammy.example | Huge sale`,
+  ]);
+  assert.deepEqual(section('BULK (all, one line each):'), [
     `${day(3 * D)} | news@brand.example | This week only | list_unsubscribe, gmail_promo`,
-    `${day(4 * D)} | win@prize.example | You have won | gmail_spam`,
     `${day(5 * D)} | no-reply-calendar@google.com | Invitation: supplier call | noreply`,
   ]);
-  // Archived mail counts; Priya is exempt because a reply to her is on the second page of sent mail.
-  assert.deepEqual(section('KEPT'), [
+  assert.deepEqual(section('CUSTOMER (all, one line each):'), [
     `${day(1 * D)} | dana@example.com | Sauna heater tripping the breaker`,
     `${day(2 * D)} | sam@example.com | Re: chiller warranty question and the 220v wiring `,
     `${day(6 * D)} | priya@acme.example | Invoice 2214`,
+    `${day(7 * D)} | verified.customer@example.com | Track A Shipment - Priority1 for A Customer`,
   ]);
-  assert.doesNotMatch(r.stdout, /old@example\.com|support@inhousewellness\.com \||team@inhousewellness\.com/, 'outside the window, sent, drafts and chats are excluded');
+  assert.doesNotMatch(r.stdout, /old@example\.com|team@inhousewellness\.com/, 'outside the window and chats are excluded');
   noSecrets(r);
 });
 
 test('prove/triage.mjs truncates subjects to 50 characters', () => {
   const r = run('prove/triage.mjs');
   const rows = r.stdout.split('\n').filter((x) => / \| /.test(x));
-  assert.ok(rows.length >= 6, 'one row per message');
+  assert.ok(rows.length >= 8, 'one row per message');
   assert.ok(rows.some((l) => l.includes('Re: chiller warranty question')), 'the long subject is present');
   for (const l of rows) {
     const subject = l.split(' | ')[2];

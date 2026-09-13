@@ -2,16 +2,16 @@
 /**
  * PROVE THE CLASSIFIER
  *
- * Runs the triage rules over the last 30 days of support@ and prints every
- * message with the decision and the reasons behind it. Nothing is built on
- * this filter until you have read the output and agree with it.
+ * Runs the triage rules over every message received in the last 30 days
+ * (archived, filtered, spam and trash included) and prints each one in its
+ * tier: SPAM, BULK (with reasons) and CUSTOMER. Rules change only after the
+ * owner has read this output.
  *
  * What to look for, in this order:
- *   1. Any REAL customer sitting in the DEMOTED list. That is the only
- *      failure that actually costs money. Should be zero.
- *   2. Newsletters sitting in KEPT. Annoying, not dangerous — this is the
- *      side we deliberately err toward.
- *   3. The reason codes. If something is demoted for a reason that looks
+ *   1. A real customer in SPAM or BULK. That is the failure that costs money.
+ *      SPAM is where Gmail misfiles real people; scan it by eye.
+ *   2. Newsletters in CUSTOMER. Annoying, not dangerous.
+ *   3. The reason codes. If something is in BULK for a reason that looks
  *      wrong, the rule is wrong, not the email.
  *
  * Run:  node prove/triage.mjs support@inhousewellness.com
@@ -32,39 +32,9 @@ function fail(msg) {
   process.exit(1);
 }
 
-// --- the same rules the worker uses, inlined so this runs with no build ---
-// Must equal NOREPLY in src/lib/triage.ts (tests/triage.test.mjs checks).
-const NOREPLY = /(no[-_.]?reply|do[-_.]?not[-_.]?reply|bounce|mailer[-_.]?daemon|postmaster)/i;
-const emailOf = (from) => (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
-
-function classify(msg, everRepliedTo) {
-  const addr = emailOf(msg.from);
-  if (everRepliedTo.has(addr))
-    return { demote: false, score: 0, signals: [], exempt: 'we have replied to this sender before' };
-
-  const signals = [];
-  const h = (n) => msg.headers[n] ?? '';
-  const labels = new Set(msg.labelIds);
-  const push = (code, why, weight) => signals.push({ code, why, weight });
-
-  if (h('list-unsubscribe')) push('list_unsubscribe', 'has a List-Unsubscribe header', 2);
-  if (h('list-id')) push('list_id', 'sent to a mailing list', 1);
-  if (labels.has('CATEGORY_PROMOTIONS')) push('gmail_promo', 'Gmail filed it under Promotions', 2);
-  if (labels.has('CATEGORY_SOCIAL')) push('gmail_social', 'Gmail filed it under Social', 2);
-  if (labels.has('SPAM')) push('gmail_spam', 'Gmail marked it as spam', 2);
-
-  const prec = h('precedence').toLowerCase();
-  if (['bulk', 'list', 'junk'].includes(prec)) push('precedence', `Precedence: ${prec}`, 1);
-  const auto = h('auto-submitted').toLowerCase();
-  if (auto && auto !== 'no') push('auto_submitted', 'machine-generated', 1);
-  if (h('x-campaign-id') || /klaviyo|mailchimp|sendgrid|hubspot/i.test(h('x-mailer')))
-    push('esp', 'sent through a bulk email platform', 1);
-  if (NOREPLY.test(addr.split('@')[0]))
-    push('noreply', 'sent from a no-reply address', 2);
-
-  const score = signals.reduce((n, s) => n + s.weight, 0);
-  return { demote: score >= 2, score, signals };
-}
+// --- the triage rules (a checked copy of src/lib/triage.ts) and verified customers ---
+import { classify, emailOf } from './_triage-rules.mjs';
+import { knownCustomerSet } from '../src/lib/known-customers.ts';
 
 // --- Gmail ---------------------------------------------------------------
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
@@ -124,7 +94,8 @@ const QUERY = `in:anywhere newer_than:${DAYS}d -in:sent -in:drafts -in:chats`;
 const ids = await listAll({ q: QUERY, includeSpamTrash: 'true' });
 if (!ids.length) fail('No mail in the last ' + DAYS + ' days. Wrong mailbox?');
 
-const kept = [], demoted = [];
+const knownCustomers = knownCustomerSet();
+const byTier = { customer: [], bulk: [], spam: [] };
 
 await mapLimit(ids, 8, async (id) => {
   const full = await gm(token, 'messages/' + id, {
@@ -143,8 +114,8 @@ await mapLimit(ids, 8, async (id) => {
     headers,
     labelIds: full.labelIds ?? [],
   };
-  const v = classify(msg, everRepliedTo);
-  (v.demote ? demoted : kept).push({ msg, v, at: Number(full.internalDate) });
+  const v = classify(msg, { everRepliedTo, knownCustomers });
+  byTier[v.tier].push({ msg, v, at: Number(full.internalDate) });
 });
 
 // --- report ---------------------------------------------------------------
@@ -155,19 +126,24 @@ const subjectOf = (s) => [...String(s).replace(/\s+/g, ' ')].slice(0, 50).join('
 const row = (r) => `${dateOf(r.at)} | ${emailOf(r.msg.from)} | ${subjectOf(r.msg.subject)}`;
 const newestFirst = (a, b) => b.at - a.at;
 
-console.log(`TOTAL: ${ids.length} messages, ${kept.length} kept, ${demoted.length} demoted`);
+console.log(`TOTAL: ${ids.length} messages, ${byTier.customer.length} customer, ${byTier.bulk.length} bulk, ${byTier.spam.length} spam`);
 console.log(`QUERY: ${QUERY}`);
 console.log('');
-console.log('DEMOTED (all of them, one line each):');
-for (const r of demoted.sort(newestFirst)) console.log(`${row(r)} | ${r.v.signals.map((s) => s.code).join(', ')}`);
+console.log('SPAM (all, one line each):');
+for (const r of byTier.spam.sort(newestFirst)) console.log(row(r));
 console.log('');
-console.log('KEPT (all of them, one line each):');
-for (const r of kept.sort(newestFirst)) console.log(row(r));
+console.log('BULK (all, one line each):');
+for (const r of byTier.bulk.sort(newestFirst)) console.log(`${row(r)} | ${r.v.signals.map((s) => s.code).join(', ')}`);
+console.log('');
+console.log('CUSTOMER (all, one line each):');
+for (const r of byTier.customer.sort(newestFirst)) console.log(row(r));
 console.log('');
 
 const perDay = (n) => (n / DAYS).toFixed(1);
+const exemptBy = (reason) => byTier.customer.filter((r) => r.v.exempt === reason).length;
 console.log('---');
 console.log(`mailbox ${MAILBOX}, last ${DAYS} days; list params: includeSpamTrash=true`);
-console.log(`${everRepliedTo.size} exempt senders from ${sentIds.length} sent messages (in:sent newer_than:180d)`);
-console.log(`${kept.filter((r) => r.v.exempt).length} kept only because we have replied to the sender before`);
-console.log(`${perDay(ids.length)} received/day, ${perDay(kept.length)} kept/day, ${perDay(demoted.length)} demoted/day`);
+console.log(`${everRepliedTo.size} exempt senders from ${sentIds.length} sent messages (in:sent newer_than:180d); ${knownCustomers.size} owner-verified customers`);
+console.log(`customer only because of an exemption: ${exemptBy('we have replied to this sender before')} replied-to, ${exemptBy('owner verified this sender as a customer')} verified`);
+console.log(`spam with bulk signals too: ${byTier.spam.filter((r) => r.v.score >= 2).length}; spam on Gmail's label alone: ${byTier.spam.filter((r) => r.v.score < 2).length}`);
+console.log(`${perDay(ids.length)} received/day, ${perDay(byTier.customer.length)} customer/day, ${perDay(byTier.bulk.length)} bulk/day, ${perDay(byTier.spam.length)} spam/day`);
