@@ -38,6 +38,9 @@ export interface Exemptions {
   markedSpam: Set<string>;
 }
 
+/** Automated-sender words, matched anywhere in the local part (never the domain). */
+export const NOREPLY = /(no-?reply|do-?not-?reply|donotreply|bounce|mailer-daemon|postmaster)/i;
+
 export const emailOf = (from: string) =>
   (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
 
@@ -100,7 +103,8 @@ export function classify(msg: Msg, ex: Exemptions): Verdict {
   }
 
   // --- sender shape --------------------------------------------------
-  if (/^(no-?reply|do-?not-?reply|donotreply|bounce|mailer-daemon|postmaster)@/i.test(addr)) {
+  // Anywhere in the local part: no-reply-calendar@, notifications-noreply@.
+  if (NOREPLY.test(addr.split('@')[0])) {
     signals.push({ code: 'noreply', why: 'sent from a no-reply address', weight: 2 });
   }
 

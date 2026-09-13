@@ -72,3 +72,46 @@ test('CATEGORY_UPDATES alone, no other signal -> NOT demoted', () => {
   assert.equal(v.demote, false);
   assert.deepEqual(codes(v), []);
 });
+
+// --- no-reply rule: the pattern anywhere in the local part (round 5) ------------
+
+for (const from of [
+  'Google Calendar <no-reply-calendar@google.com>',
+  'LinkedIn <notifications-noreply@linkedin.com>',
+  'Apps Script <noreply-apps-scripts-notifications@google.com>',
+  'Google Workspace <workspace-noreply@google.com>',
+]) {
+  test(`no-reply pattern inside the local part is demoted on noreply: ${from}`, () => {
+    const v = classify(msg({ from, subject: 'Notification' }), noExemptions());
+    assert.equal(v.demote, true);
+    assert.deepEqual(codes(v), ['noreply']);
+  });
+}
+
+for (const from of [
+  'Sarah Kreplin <sarah.kreplin@example.com>',       // "rep" inside a real surname
+  'Sauna Repairs <repairs@saunarepair.example>',   // "rep" as a word
+  'Reply Guy <replyguy.jones@example.com>',          // "reply" without "no"
+]) {
+  test(`a real person whose address merely contains "rep"/"reply" is NOT flagged: ${from}`, () => {
+    const v = classify(msg({ from }), noExemptions());
+    assert.equal(v.demote, false);
+    assert.deepEqual(codes(v), []);
+  });
+}
+
+test('the no-reply rule only reads the local part, not the domain', () => {
+  const v = classify(msg({ from: 'Dana <dana@noreply-domain.example>' }), noExemptions());
+  assert.deepEqual(codes(v), []);
+});
+
+test('prove/triage.mjs uses the same no-reply pattern as src/lib/triage.ts', async () => {
+  const { readFileSync } = await import('node:fs');
+  const grab = (file) => {
+    const text = readFileSync(new URL('../' + file, import.meta.url), 'utf8');
+    const m = text.match(/const NOREPLY = (\/.+\/[a-z]*);/);
+    assert.ok(m, `${file} defines const NOREPLY = /.../`);
+    return m[1];
+  };
+  assert.equal(grab('prove/triage.mjs'), grab('src/lib/triage.ts'));
+});

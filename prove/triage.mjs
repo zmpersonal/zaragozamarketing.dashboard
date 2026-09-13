@@ -33,6 +33,8 @@ function fail(msg) {
 }
 
 // --- the same rules the worker uses, inlined so this runs with no build ---
+// Must equal NOREPLY in src/lib/triage.ts (tests/triage.test.mjs checks).
+const NOREPLY = /(no-?reply|do-?not-?reply|donotreply|bounce|mailer-daemon|postmaster)/i;
 const emailOf = (from) => (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
 
 function classify(msg, everRepliedTo) {
@@ -57,7 +59,7 @@ function classify(msg, everRepliedTo) {
   if (auto && auto !== 'no') push('auto_submitted', 'machine-generated', 1);
   if (h('x-campaign-id') || /klaviyo|mailchimp|sendgrid|hubspot/i.test(h('x-mailer')))
     push('esp', 'sent through a bulk email platform', 1);
-  if (/^(no-?reply|do-?not-?reply|donotreply|bounce|mailer-daemon|postmaster)@/i.test(addr))
+  if (NOREPLY.test(addr.split('@')[0]))
     push('noreply', 'sent from a no-reply address', 2);
 
   const score = signals.reduce((n, s) => n + s.weight, 0);
