@@ -15,48 +15,74 @@ export const OPEN_MIN = 8 * 60;    // 08:00
 export const CLOSE_MIN = 17 * 60;  // 17:00
 export const WORKDAYS = new Set([1, 2, 3, 4, 5]); // Mon-Fri
 
+const FORMAT = new Intl.DateTimeFormat('en-US', {
+  timeZone: ZONE,
+  weekday: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hourCycle: 'h23',
+});
+
 /** Local wall-clock parts for a unix timestamp, in the support zone. */
 function parts(unixSec: number) {
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: ZONE,
-    weekday: 'short', hour: '2-digit', minute: '2-digit',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour12: false,
-  });
   const f: Record<string, string> = {};
-  for (const p of fmt.formatToParts(new Date(unixSec * 1000))) f[p.type] = p.value;
-  const dayIndex = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(f.weekday);
+  for (const p of FORMAT.formatToParts(new Date(unixSec * 1000))) f[p.type] = p.value;
   return {
-    dayIndex,
+    year: Number(f.year),
+    month: Number(f.month),
+    day: Number(f.day),
+    dayIndex: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(f.weekday),
     minuteOfDay: Number(f.hour) * 60 + Number(f.minute),
-    dateKey: `${f.year}-${f.month}-${f.day}`,
+    second: Number(f.second),
   };
+}
+
+/** Seconds the zone's wall clock is ahead of UTC at this instant (negative in Chicago). */
+function offsetAt(unixSec: number): number {
+  const p = parts(unixSec);
+  const wallAsUtc = Date.UTC(p.year, p.month - 1, p.day, 0, p.minuteOfDay, p.second) / 1000;
+  return wallAsUtc - unixSec;
+}
+
+/**
+ * Unix time of a local wall-clock moment on a calendar date. Two passes:
+ * the offset is looked up at a first guess, then again at the corrected
+ * instant, which settles it on either side of a transition. Only valid for
+ * wall times that exist on that date. The ones we ask for (00:00, 08:00,
+ * 17:00) always exist in Chicago, whose changes happen at 02:00.
+ */
+function localToUnix(year: number, month: number, day: number, minuteOfDay: number): number {
+  const wallAsUtc = Date.UTC(year, month - 1, day, 0, minuteOfDay) / 1000;
+  const guess = wallAsUtc - offsetAt(wallAsUtc);
+  return wallAsUtc - offsetAt(guess);
 }
 
 /** Business minutes elapsed between two unix timestamps. */
 export function businessMinutes(from: number, to: number): number {
   if (to <= from) return 0;
   let total = 0;
-  const DAY = 86400;
 
-  // Walk day by day. At a handful of messages a day this is nowhere
-  // near hot enough to justify anything cleverer.
-  for (let t = from; t < to; ) {
-    const p = parts(t);
-    const dayStartUnix = t - p.minuteOfDay * 60;
+  // The cursor is a local CALENDAR DATE, not an instant. Stepping the date
+  // with Date.UTC(y, m, d + 1) is pure calendar arithmetic (it rolls months
+  // and years, and knows nothing about DST), so every iteration advances
+  // exactly one local day however long that day is in seconds (23, 24 or 25h).
+  // Each day's business window is then resolved from its own wall times.
+  const start = parts(from);
+  let date = new Date(Date.UTC(start.year, start.month - 1, start.day));
 
-    if (WORKDAYS.has(p.dayIndex)) {
-      const windowStart = dayStartUnix + OPEN_MIN * 60;
-      const windowEnd = dayStartUnix + CLOSE_MIN * 60;
-      const a = Math.max(t, windowStart);
-      const b = Math.min(to, windowEnd);
+  for (;;) {
+    const y = date.getUTCFullYear();
+    const m = date.getUTCMonth() + 1;
+    const d = date.getUTCDate();
+    if (localToUnix(y, m, d, 0) >= to) break;
+
+    // The weekday of a calendar date does not depend on the zone.
+    if (WORKDAYS.has(date.getUTCDay())) {
+      const a = Math.max(from, localToUnix(y, m, d, OPEN_MIN));
+      const b = Math.min(to, localToUnix(y, m, d, CLOSE_MIN));
       if (b > a) total += (b - a) / 60;
     }
 
-    // Jump to the next local midnight. Adding a flat 24h would drift an
-    // hour twice a year, so we re-anchor off the day we just measured.
-    t = dayStartUnix + DAY + 7200;       // overshoot into the next day
-    t = t - parts(t).minuteOfDay * 60;   // then snap back to its midnight
+    date = new Date(Date.UTC(y, m - 1, d + 1));
   }
   return Math.round(total);
 }
