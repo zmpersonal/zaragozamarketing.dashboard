@@ -39,16 +39,22 @@ test('an archived message and a spam-filed message are both ingested', async () 
   assert.equal((await row(env, 'archived')).status, 'waiting');
 });
 
-test('ingest logs the exact query, and lists messages with includeSpamTrash, paged to the end', async () => {
+test('the backfill logs the exact query, lists with includeSpamTrash, and follows page tokens across runs', async () => {
   const env = makeEnv();
   const threads = {};
   for (let i = 0; i < PAGE_SIZE * 2 + 1; i++) threads[`t${i}`] = [inbound(ago(1 + i), `C${i} <c${i}@example.com>`)];
-  const { logs, requests } = await run(env, threads);
-
-  assert.ok(logs.some((l) => l.includes(`query "${QUERY}"`) && l.includes('includeSpamTrash=true')), logs.join('\n'));
-  const lists = requests.filter((u) => u.pathname.endsWith('/messages'));
-  assert.ok(lists.length >= 3, 'followed nextPageToken');
+  const all = [];
+  let first;
+  for (let runNo = 0; runNo < 4; runNo++) {
+    const r = await run(env, threads, { pageSize: PAGE_SIZE });
+    first ??= r;
+    all.push(...r.requests);
+  }
+  assert.ok(first.logs.some((l) => l.includes(`query "${QUERY}"`) && l.includes('includeSpamTrash=true')), first.logs.join('\n'));
+  const lists = all.filter((u) => u.pathname.endsWith('/messages'));
+  assert.ok(lists.length >= 3, 'one page per run, following the page token');
   assert.ok(lists.every((u) => u.searchParams.get('q') === QUERY && u.searchParams.get('includeSpamTrash') === 'true'));
+  assert.ok(lists.slice(1).every((u) => u.searchParams.get('pageToken')), 'later pages use the stored page token');
   for (const id of Object.keys(threads)) assert.ok(await row(env, id), `${id} ingested (incl. the last page)`);
 });
 

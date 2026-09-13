@@ -34,7 +34,45 @@ export function makeEnv() {
   };
 }
 
-export const PAGE_SIZE = 2; // small pages make a missing pageToken loop visible
+export const PAGE_SIZE = 2; // pass { pageSize: PAGE_SIZE } to make a missing pageToken loop visible
+
+// --- history ledger ---------------------------------------------------------
+// Real Gmail (verified on support@, round 7): users.getProfile returns a numeric
+// historyId; history.list returns records {id, messages[{id, threadId}],
+// messagesAdded[{message{id, threadId, labelIds}}], labelsAdded/labelsRemoved}
+// with increasing ids; an expired or future startHistoryId is 404, a
+// non-numeric one is 400. The fake keeps a ledger per mailbox object and
+// records a change whenever a test adds a message or changes its labels.
+const ledgers = new WeakMap();
+const ledgerOf = (threads) => {
+  if (!ledgers.has(threads)) ledgers.set(threads, { historyId: 1000, seen: new Map(), records: [], expiredBefore: 0 });
+  return ledgers.get(threads);
+};
+
+function scanLedger(threads) {
+  const L = ledgerOf(threads);
+  for (const [threadId, msgs] of Object.entries(threads)) {
+    const list = msgs.raw ? [{ key: `${threadId}-raw`, labelIds: ['INBOX'] }] : msgs.map((m, i) => ({ key: `${threadId}-${i}`, labelIds: m.labelIds }));
+    for (const { key, labelIds } of list) {
+      const now = JSON.stringify([...labelIds].sort());
+      const before = L.seen.get(key);
+      if (before === now) continue;
+      L.historyId += 1;
+      const ref = { id: key, threadId };
+      L.records.push(before === undefined
+        ? { id: String(L.historyId), messages: [ref], messagesAdded: [{ message: { ...ref, labelIds } }] }
+        : { id: String(L.historyId), messages: [ref], labelsAdded: [{ message: { ...ref, labelIds }, labelIds }] });
+      L.seen.set(key, now);
+    }
+  }
+  return L;
+}
+
+/** Make every history id so far unavailable, like Gmail after its retention window. */
+export function expireHistory(threads) {
+  const L = scanLedger(threads);
+  L.expiredBefore = L.historyId + 1;
+}
 
 /** Gmail search over the fake mailbox. Unknown operators throw, so an untested query fails loudly. */
 function search(threads, q, includeSpamTrash) {
@@ -63,7 +101,7 @@ function search(threads, q, includeSpamTrash) {
  * Gmail calls must carry the token minted for the impersonated mailbox.
  * opts.requests collects every Gmail URL requested.
  */
-export async function withGmail(threads, fn, { onToken, onGmail, requests } = {}) {
+export async function withGmail(threads, fn, { onToken, onGmail, requests, pageSize = 100 } = {}) {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
@@ -83,12 +121,29 @@ export async function withGmail(threads, fn, { onToken, onGmail, requests } = {}
 
     const path = url.pathname.replace('/gmail/v1/users/me/', '');
     const q = url.searchParams.get('q') ?? '';
+    if (path === 'profile') {
+      return ok({ emailAddress: MAILBOX, historyId: String(scanLedger(threads).historyId) });
+    }
+    if (path === 'history') {
+      const L = scanLedger(threads);
+      const start = url.searchParams.get('startHistoryId') ?? '';
+      if (!/^\d+$/.test(start)) return new Response(JSON.stringify({ error: { code: 400, status: 'INVALID_ARGUMENT' } }), { status: 400 });
+      if (Number(start) < L.expiredBefore || Number(start) > L.historyId) {
+        return new Response(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND' } }), { status: 404 });
+      }
+      const after = L.records.filter((r) => Number(r.id) > Number(start));
+      const offset = Number(url.searchParams.get('pageToken') ?? 0);
+      const size = Math.min(pageSize, Number(url.searchParams.get('maxResults') ?? 100));
+      const page = after.slice(offset, offset + size);
+      const next = offset + size < after.length ? String(offset + size) : undefined;
+      return ok({ history: page, historyId: String(L.historyId), ...(next ? { nextPageToken: next } : {}) });
+    }
     if (path === 'messages') {
       let hits;
       try { hits = search(threads, q, url.searchParams.get('includeSpamTrash') === 'true'); }
       catch (err) { return new Response(JSON.stringify({ error: { code: 400, message: err.message } }), { status: 400 }); }
       const start = Number(url.searchParams.get('pageToken') ?? 0);
-      const size = Math.min(PAGE_SIZE, Number(url.searchParams.get('maxResults') ?? 100));
+      const size = Math.min(pageSize, Number(url.searchParams.get('maxResults') ?? 100));
       const page = hits.slice(start, start + size);
       const next = start + size < hits.length ? String(start + size) : undefined;
       return ok({ messages: page.map(({ id, threadId }) => ({ id, threadId })), ...(next ? { nextPageToken: next } : {}) });

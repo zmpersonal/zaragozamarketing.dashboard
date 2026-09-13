@@ -62,6 +62,7 @@ export function clearTokenCache() {
 export async function serviceAccountToken(
   key: ServiceAccountKey, subject: string, scope: string,
   nowSeconds: number = Math.floor(Date.now() / 1000),
+  fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
   const cacheKey = `${key.client_email}|${subject}|${scope}`;
   const hit = cache.get(cacheKey);
@@ -78,7 +79,7 @@ export async function serviceAccountToken(
     'RSASSA-PKCS1-v1_5', await importPrivateKey(key.private_key), encoder.encode(unsigned),
   ));
 
-  const res = await fetch(tokenUri, {
+  const res = await fetchImpl(tokenUri, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({

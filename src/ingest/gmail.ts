@@ -1,17 +1,28 @@
 /**
- * Gmail ingest — the "email scan", running on a cron for every mailbox.
+ * Gmail ingest — incremental, bounded, on a cron for every mailbox.
  *
- * Reads the whole received stream, the same population prove/triage.mjs
- * measures: everything received in the window, archived, auto-filtered,
- * spam and trash included, excluding only our sent mail, drafts and chats.
- * Reading only in:inbox would make the triage filter moot: mail a Gmail
- * filter or Gmail's spam judgment moved never reached the queue.
+ * Population: the whole received stream, the same one prove/triage.mjs
+ * measures (archived, filtered, spam and trash included; only our sent mail,
+ * drafts and chats excluded). Never in:inbox, which makes the filter moot.
  *
- * Syncs a thread row per conversation, with a triage tier (customer / bulk /
- * spam) from the first inbound message.
- * Status and awaiting_since come from the full message timeline via
- * lib/thread-state.ts: waiting while any inbound message has no reply
- * after it, answered once the last word is ours.
+ * Incremental: source.sync_cursor holds JSON {historyId, pending, backfillPageToken}.
+ *   - empty cursor  -> bounded backfill: read the profile's historyId, list ONE
+ *                      page of RECEIVED_QUERY, queue its threads, and keep the
+ *                      page token so later runs catch up page by page.
+ *   - historyId     -> history.list since it: only threads that changed.
+ *   - expired (404) or invalid (400) historyId
+ *                   -> bounded window sync (the same one-page listing) and
+ *                      re-seed the cursor from the profile.
+ * Gmail behaviour verified on support@ (round 7): profile historyId is numeric;
+ * history records carry thread ids and increase; expired/future ids 404,
+ * non-numeric ids 400.
+ *
+ * Bounded: at most GMAIL_LIMITS.threadsPerRun threads per mailbox per run,
+ * and a Budget (lib/budget.ts) that counts every fetch and D1 query. Work that
+ * doesn't fit stays in cursor.pending for the next run.
+ *
+ * Each thread gets a triage tier from its first inbound message; status and
+ * awaiting_since come from the full timeline (lib/thread-state.ts).
  */
 import type { Env } from '../index.ts';
 import { emailOf } from '../lib/triage.ts';
@@ -20,29 +31,64 @@ import { syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure } from '../db/failures.ts';
 import { GMAIL_READONLY, parseServiceAccount, serviceAccountToken, type ServiceAccountKey } from '../lib/google-auth.ts';
 import { classify, type Exemptions } from '../lib/triage.ts';
+import { Budget } from '../lib/budget.ts';
 
 const WINDOW_DAYS = 30;
 export const RECEIVED_QUERY = `in:anywhere newer_than:${WINDOW_DAYS}d -in:sent -in:drafts -in:chats`;
 
-/** Every thread id with a received message matching the query, following nextPageToken to the end. */
-async function receivedThreadIds(auth: Record<string, string>): Promise<{ messages: number; threadIds: string[] }> {
-  const threadIds = new Set<string>();
-  let messages = 0;
-  let pageToken: string | undefined;
-  do {
-    const url = new URL(`${GMAIL}messages`);
-    url.searchParams.set('q', RECEIVED_QUERY);
-    // messages.list drops SPAM and TRASH unless asked.
-    url.searchParams.set('includeSpamTrash', 'true');
-    url.searchParams.set('maxResults', '500');
-    if (pageToken) url.searchParams.set('pageToken', pageToken);
-    const res = await fetch(url, { headers: auth });
-    if (!res.ok) throw new Error(`Gmail messages.list -> ${res.status}`);
-    const page = await res.json<{ messages?: { id: string; threadId: string }[]; nextPageToken?: string }>();
-    for (const m of page.messages ?? []) { messages++; threadIds.add(m.threadId); }
-    pageToken = page.nextPageToken;
-  } while (pageToken);
-  return { messages, threadIds: [...threadIds] };
+export const GMAIL_LIMITS = {
+  /** threads fetched per mailbox per run */
+  threadsPerRun: 25,
+  /** messages per backfill / fallback page; one page per run */
+  backfillPageSize: 100,
+  /** history.list pages per run (up to 500 records each) */
+  historyPages: 2,
+  /** cap on queued thread ids carried in the cursor */
+  maxPending: 500,
+  /** per invocation, all mailboxes. Workers Paid allows 10,000 subrequests and 1,000 D1 queries. */
+  maxSubrequests: 900,
+  maxD1Queries: 900,
+};
+
+/**
+ * Worst-case D1 queries to sync one thread, before its reply count is known:
+ * SELECT + INSERT/UPDATE + reopen/unblock log + known_sender upsert + clearFailure,
+ * plus recordFailure's 2 if it fails. Each reply in the thread can add one
+ * response row on top; that is checked once the thread is fetched.
+ */
+const THREAD_QUERIES = 7;
+/** Per mailbox, outside the thread loop: 2 exemption reads + 1 cursor write. */
+const MAILBOX_QUERIES = 3;
+/** Per mailbox, outside the thread loop: token + at most 3 listing calls (history pages or profile + list, + one catch-up page). */
+const MAILBOX_FETCHES = 4;
+
+interface Cursor { historyId: string | null; pending: string[]; backfillPageToken: string | null }
+
+function parseCursor(raw: string | null): Cursor {
+  const empty: Cursor = { historyId: null, pending: [], backfillPageToken: null };
+  if (!raw) return empty;
+  if (/^\d+$/.test(raw)) return { ...empty, historyId: raw };
+  try {
+    const c = JSON.parse(raw);
+    return {
+      historyId: typeof c.historyId === 'string' ? c.historyId : null,
+      pending: Array.isArray(c.pending) ? c.pending.filter((x: unknown) => typeof x === 'string') : [],
+      backfillPageToken: typeof c.backfillPageToken === 'string' ? c.backfillPageToken : null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+class DeferThread extends Error {}
+
+const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
+
+async function gmailGet(budget: Budget, auth: Record<string, string>, path: string, params: [string, string][] = []) {
+  const url = new URL(GMAIL + path);
+  for (const [k, v] of params) url.searchParams.append(k, v);
+  const res = await budget.fetch(url, { headers: auth });
+  return { status: res.status, body: res.ok ? await res.json<any>() : null };
 }
 
 /** Exemptions from our own records: sender rules (verified customers, spam senders) and everyone we have replied to. */
@@ -59,10 +105,58 @@ async function loadExemptions(db: D1Database): Promise<Exemptions> {
   };
 }
 
-const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
+const queue = (cursor: Cursor, ids: Iterable<string>) => {
+  for (const id of ids) if (!cursor.pending.includes(id)) cursor.pending.push(id);
+};
 
-export async function ingestGmail(env: Env) {
-  const { results: sources } = await env.DB
+/** One page of the received stream (backfill / fallback / catch-up). */
+async function listWindowPage(budget: Budget, auth: Record<string, string>, cursor: Cursor, pageToken: string | null) {
+  const params: [string, string][] = [
+    ['q', RECEIVED_QUERY], ['includeSpamTrash', 'true'], ['maxResults', String(GMAIL_LIMITS.backfillPageSize)],
+  ];
+  if (pageToken) params.push(['pageToken', pageToken]);
+  const r = await gmailGet(budget, auth, 'messages', params);
+  if (r.status === 400 && pageToken) return { messages: 0, threads: 0, expiredToken: true };
+  if (!r.body) throw new Error(`Gmail messages.list -> ${r.status}`);
+  const ids = new Set<string>((r.body.messages ?? []).map((m: { threadId: string }) => m.threadId));
+  queue(cursor, ids);
+  cursor.backfillPageToken = r.body.nextPageToken ?? null;
+  return { messages: (r.body.messages ?? []).length, threads: ids.size, expiredToken: false };
+}
+
+/** Threads changed since cursor.historyId, or { expired } if Gmail no longer has that history. */
+async function readHistory(budget: Budget, auth: Record<string, string>, cursor: Cursor) {
+  const changed = new Set<string>();
+  let pageToken: string | undefined;
+  let historyId = cursor.historyId as string;
+  for (let page = 0; page < GMAIL_LIMITS.historyPages; page++) {
+    const params: [string, string][] = [
+      ['startHistoryId', cursor.historyId as string], ['maxResults', '500'],
+      ['historyTypes', 'messageAdded'], ['historyTypes', 'labelAdded'], ['historyTypes', 'labelRemoved'],
+    ];
+    if (pageToken) params.push(['pageToken', pageToken]);
+    const r = await gmailGet(budget, auth, 'history', params);
+    if (r.status === 404 || r.status === 400) return { expired: true as const, status: r.status };
+    if (!r.body) throw new Error(`Gmail history.list -> ${r.status}`);
+    for (const rec of r.body.history ?? []) {
+      // Drafts and chats are not mail we act on; skip messages added with those labels.
+      const skip = new Set<string>((rec.messagesAdded ?? [])
+        .filter((a: any) => (a.message?.labelIds ?? []).some((l: string) => l === 'DRAFT' || l === 'CHAT'))
+        .map((a: any) => a.message.id));
+      for (const m of rec.messages ?? []) if (!skip.has(m.id)) changed.add(m.threadId);
+      historyId = rec.id;
+    }
+    pageToken = r.body.nextPageToken;
+    if (!pageToken) { historyId = r.body.historyId ?? historyId; break; }
+    // More pages than this run reads: resume after the last record we saw.
+  }
+  return { expired: false as const, changed, historyId };
+}
+
+export async function ingestGmail(env: Env, budget: Budget = Budget.from(env, GMAIL_LIMITS)) {
+  const db = budget.wrap(env.DB);
+  const benv = { ...env, DB: db };
+  const { results: sources } = await db
     .prepare(`SELECT * FROM source WHERE provider = 'gmail'`).all<any>();
   if (!sources.length) return;
 
@@ -77,47 +171,96 @@ export async function ingestGmail(env: Env) {
   }
 
   for (const src of sources) {
+    if (!budget.canAfford(MAILBOX_FETCHES, MAILBOX_QUERIES)) {
+      console.warn(`gmail ingest ${src.address}: budget exhausted before this mailbox; it runs next time`);
+      break;
+    }
+    const cursor = parseCursor(src.sync_cursor);
+    let mode = 'incremental';
+    let detail = '';
+    let processed = 0;
     try {
-      const token = await serviceAccountToken(serviceAccount, src.address, GMAIL_READONLY);
+      const token = await serviceAccountToken(serviceAccount, src.address, GMAIL_READONLY, undefined, budget.fetch);
       const auth = { Authorization: `Bearer ${token}` };
+      const exemptions = await loadExemptions(db);
 
-      const { messages, threadIds } = await receivedThreadIds(auth);
-      console.log(`gmail ingest ${src.address}: query "${RECEIVED_QUERY}" includeSpamTrash=true -> ${messages} messages in ${threadIds.length} threads`);
-      const exemptions = await loadExemptions(env.DB);
+      const seed = async () => {
+        const profile = await gmailGet(budget, auth, 'profile');
+        if (!profile.body?.historyId) throw new Error(`Gmail profile -> ${profile.status}`);
+        cursor.historyId = String(profile.body.historyId);
+        cursor.backfillPageToken = null;
+        const page = await listWindowPage(budget, auth, cursor, null);
+        detail = `query "${RECEIVED_QUERY}" includeSpamTrash=true -> ${page.messages} messages in ${page.threads} threads`;
+      };
 
-      for (const threadId of threadIds) {
-        const stub = { id: threadId };
-        // One malformed thread (bad payload, a value the database rejects)
-        // is logged, recorded in ingest_failure, and skipped. It must not
-        // stop the rest of the mailbox. A clean sync clears its record.
-        const itemId = `gmail:${stub.id}`;
-        try {
-          await syncGmailThread(env, src, auth, stub.id, exemptions);
-          await clearFailure(env.DB, src.id, itemId);
-        } catch (err) {
-          const { failures } = await recordFailure(env.DB, src.id, itemId, err, Math.floor(Date.now() / 1000));
-          console.error(`gmail ingest skipped thread ${stub.id} in ${src.address} (failure ${failures})`, err);
+      if (!cursor.historyId) {
+        mode = 'backfill';
+        await seed();
+      } else {
+        const from = cursor.historyId;
+        const h = await readHistory(budget, auth, cursor);
+        if (h.expired) {
+          mode = 'fallback';
+          console.warn(`gmail ingest ${src.address}: mode=fallback historyId ${from} ${h.status === 404 ? 'expired' : 'invalid'} (${h.status}); re-seeding from a bounded window`);
+          await seed();
+        } else {
+          queue(cursor, h.changed);
+          cursor.historyId = h.historyId;
+          detail = `historyId ${from} -> ${h.historyId}, ${h.changed.size} changed threads`;
+          // Still catching up on the initial backfill: one more page when there is room.
+          if (cursor.backfillPageToken && cursor.pending.length < GMAIL_LIMITS.threadsPerRun) {
+            const page = await listWindowPage(budget, auth, cursor, cursor.backfillPageToken);
+            if (page.expiredToken) cursor.backfillPageToken = null;
+            detail += `; backfill page +${page.threads} threads`;
+          }
         }
       }
 
-      await env.DB.prepare(`UPDATE source SET last_synced_at = ?2 WHERE id = ?1`)
-        .bind(src.id, Math.floor(Date.now() / 1000)).run();
+      if (cursor.pending.length > GMAIL_LIMITS.maxPending) {
+        console.warn(`gmail ingest ${src.address}: ${cursor.pending.length} threads queued; keeping ${GMAIL_LIMITS.maxPending}`);
+        cursor.pending = cursor.pending.slice(0, GMAIL_LIMITS.maxPending);
+      }
+
+      while (cursor.pending.length && processed < GMAIL_LIMITS.threadsPerRun) {
+        // Reserve this thread's fetch and base writes, plus the cursor write that ends the run.
+        if (!budget.canAfford(1, THREAD_QUERIES + 1)) break;
+        const threadId = cursor.pending[0];
+        const itemId = `gmail:${threadId}`;
+        try {
+          await syncGmailThread(benv, src, auth, threadId, exemptions, budget);
+          await clearFailure(db, src.id, itemId);
+        } catch (err) {
+          if (err instanceof DeferThread) break; // too big for what's left of this run; it stays first in line
+          // One malformed thread is logged, recorded in ingest_failure, and skipped.
+          const { failures } = await recordFailure(db, src.id, itemId, err, Math.floor(Date.now() / 1000));
+          console.error(`gmail ingest skipped thread ${threadId} in ${src.address} (failure ${failures})`, err);
+        }
+        cursor.pending.shift();
+        processed++;
+      }
     } catch (err) {
-      // Token or list failure: this mailbox is skipped this run. One dead
-      // mailbox must not stop the others.
+      // Token, listing or history failure: this mailbox is skipped this run. One dead
+      // mailbox must not stop the others. The cursor is not advanced.
       console.error(`gmail ingest failed for ${src.address}`, err);
+      continue;
     }
+
+    await db.prepare(`UPDATE source SET last_synced_at = ?2, sync_cursor = ?3 WHERE id = ?1`)
+      .bind(src.id, Math.floor(Date.now() / 1000), JSON.stringify(cursor)).run();
+    console.log(`gmail ingest ${src.address}: mode=${mode} ${detail}; processed ${processed} threads, ${cursor.pending.length} pending; subrequests fetch=${budget.fetches} d1=${budget.queries} (limits ${budget.maxSubrequests} / d1 ${budget.maxQueries})`);
   }
 }
 
 /** Fetch one Gmail thread and write it to its thread row. */
 async function syncGmailThread(
   env: Env, src: { id: string; brand_id: string; address: string }, auth: Record<string, string>,
-  threadId: string, exemptions: Exemptions,
+  threadId: string, exemptions: Exemptions, budget: Budget,
 ) {
-  const t = await fetch(`${GMAIL}threads/${threadId}?format=metadata`, { headers: auth })
-    .then((r) => r.json<any>());
-  const msgs = t.messages ?? [];
+  const res = await budget.fetch(`${GMAIL}threads/${threadId}?format=metadata`, { headers: auth });
+  const t = await res.json<any>();
+  // Drafts and chats are not conversation messages: a saved draft reply from
+  // our address must never count as having replied.
+  const msgs = (t.messages ?? []).filter((m: any) => !(m.labelIds ?? []).some((l: string) => l === 'DRAFT' || l === 'CHAT'));
   if (!msgs.length) return;
 
   const header = (m: any, name: string) =>
@@ -137,6 +280,10 @@ async function syncGmailThread(
   if (!firstIn) return; // nothing inbound: not a customer conversation
 
   const customerFrom = header(firstIn, 'from');
+
+  // Each reply in the thread can add a response row: make sure the writes fit.
+  const replies = msgs.filter((m: any) => !isInbound(m)).length;
+  if (!budget.canAfford(0, THREAD_QUERIES + replies + 1)) throw new DeferThread();
 
   // Triage from the first inbound message. Replying in this very thread
   // counts as having replied to its sender; record it for other threads too.

@@ -20,7 +20,10 @@ export interface Env {
   /** Service-account key JSON (domain-wide delegation, gmail.readonly). A secret; Workers have no filesystem. */
   GOOGLE_SERVICE_ACCOUNT_JSON: string;
   QUO_API_KEY: string;
-  QUO_WEBHOOK_SECRET: string;    // whsec_... signing key returned when the webhook is created (Standard Webhooks)
+  QUO_WEBHOOK_SECRET: string;
+  /** Optional per-invocation ingest budget overrides (e.g. 45 / 45 on Workers Free). */
+  INGEST_MAX_SUBREQUESTS?: string;
+  INGEST_MAX_D1_QUERIES?: string;    // whsec_... signing key returned when the webhook is created (Standard Webhooks)
   ASSETS: Fetcher;
 }
 
@@ -33,6 +36,10 @@ const json = (data: unknown, status = 200) =>
   });
 
 const now = () => Math.floor(Date.now() / 1000);
+
+/** Must match [triggers] crons in wrangler.toml. */
+export const GMAIL_CRON = '*/5 * * * *';
+export const QUO_CRON = '2-59/5 * * * *';
 
 /**
  * Action kinds that reach the customer. Logging one always records contact
@@ -249,7 +256,13 @@ export default {
         batch.push(
           env.DB.prepare(
             `UPDATE thread
-             SET status = COALESCE(?2, status),
+             -- 'answered' without contact while the clock is still running would take the
+             -- customer out of the queue, and incremental ingest won't re-read an unchanged
+             -- thread to correct it, so it is stored as 'waiting'.
+             SET status = CASE
+                   WHEN ?2 = 'answered' AND NOT ?7 AND awaiting_since IS NOT NULL THEN 'waiting'
+                   ELSE COALESCE(?2, status)
+                 END,
                  blocked_on   = CASE WHEN ?2 IS NULL THEN blocked_on ELSE ?3 END,
                  blocked_note = CASE WHEN ?2 IS NULL THEN blocked_note ELSE ?4 END,
                  -- set on the move to blocked, kept while it stays blocked, cleared on leaving
@@ -312,9 +325,14 @@ export default {
     return json({ error: 'No such route' }, 404);
   },
 
-  /** Cron catches anything the webhooks missed. Wired in wrangler.toml. */
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(Promise.all([ingestGmail(env), ingestQuo(env)]));
+  /**
+   * Separate cron triggers (wrangler.toml), so Gmail and Quo each get a whole
+   * invocation's subrequest budget instead of sharing one.
+   */
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (event.cron === GMAIL_CRON) ctx.waitUntil(ingestGmail(env));
+    else if (event.cron === QUO_CRON) ctx.waitUntil(ingestQuo(env));
+    else console.warn(`scheduled: no ingest is wired to cron "${event.cron}"`);
   },
 };
 

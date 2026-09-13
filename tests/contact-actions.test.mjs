@@ -85,7 +85,10 @@ test('customer writes again after the call: sync reopens the clock from that mes
   assert.equal(t.awaiting_since, Date.parse(later) / 1000);
 });
 
-test("a note is not contact: it sets no last_outbound_at, and the sync keeps the thread waiting", async () => {
+test("a note marked 'answered' is not contact: the thread stays waiting at once, and after the next sync", async () => {
+  // Ingest is incremental, so an unchanged thread is not re-read on every run.
+  // A non-contact 'answered' must not take the customer out of the queue while
+  // their clock is still running.
   const e = env();
   const mailbox = { t1: [inbound(hoursAgo(2), DANA)] };
   await withGmail(mailbox, () => ingestGmail(e));
@@ -93,7 +96,10 @@ test("a note is not contact: it sets no last_outbound_at, and the sync keeps the
   await logAction(e, { thread_id: 'gmail:t1', kind: 'note', body: 'Asked the supplier.', status: 'answered' });
   let t = await row(e, 't1');
   assert.equal(t.last_outbound_at, null);
+  assert.equal(t.status, 'waiting', 'stored as waiting straight away');
+  assert.notEqual(t.awaiting_since, null);
 
+  mailbox.t1[0].labelIds = ['INBOX', 'IMPORTANT']; // any Gmail change re-syncs the thread
   await withGmail(mailbox, () => ingestGmail(e));
   t = await row(e, 't1');
   assert.equal(t.status, 'waiting');

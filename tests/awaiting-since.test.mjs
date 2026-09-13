@@ -118,6 +118,8 @@ test('guard: closed thread with nothing new stays closed and is not awaiting', a
   await withGmail(mailbox, () => ingestGmail(env));
   await closeThread(env, 'gmail:t1', T3);
 
+  // A Gmail change with no new inbound (archiving it) makes ingest re-read the thread.
+  mailbox.t1[2].labelIds = [];
   await withGmail(mailbox, () => ingestGmail(env));
   await withGmail(mailbox, () => ingestGmail(env));
 

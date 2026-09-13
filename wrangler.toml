@@ -11,9 +11,11 @@ binding = "DB"
 database_name = "inhouse-ops"
 database_id = "PUT_YOUR_D1_ID_HERE"
 
-# Every 5 minutes. Well inside the free tier.
+# Gmail every 5 minutes (:00, :05, ...) and Quo every 5 minutes offset by 2
+# (:02, :07, ...). Separate triggers give each its own per-invocation
+# subrequest budget. Must match GMAIL_CRON / QUO_CRON in src/index.ts.
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/5 * * * *", "2-59/5 * * * *"]
 
 [vars]
 ACCESS_TEAM = "CHANGE_ME"           # <team>.cloudflareaccess.com
