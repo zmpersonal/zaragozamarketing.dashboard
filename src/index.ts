@@ -105,7 +105,11 @@ async function authenticate(req: Request, env: Env): Promise<User | null> {
 // Queries
 // ---------------------------------------------------------------
 
-/** The top strip: waiting count and oldest item per brand × channel. */
+/**
+ * The top strip: waiting count and oldest item per brand × channel, for
+ * Needs-reply threads only. Bulk and spam are counted in their own queue
+ * sections, never in these header numbers.
+ */
 async function board(env: Env) {
   const { results } = await env.DB.prepare(`
     SELECT brand_id, channel,
@@ -113,7 +117,7 @@ async function board(env: Env) {
            MIN(awaiting_since)         AS oldest_at,
            SUM(status = 'blocked')     AS blocked
     FROM thread
-    WHERE status IN ('waiting','blocked')
+    WHERE status IN ('waiting','blocked') AND triage = 'customer'
     GROUP BY brand_id, channel
   `).all();
   return results;

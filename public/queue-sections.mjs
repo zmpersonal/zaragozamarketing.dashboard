@@ -93,3 +93,24 @@ export function renderSection(section, esc, opts = {}) {
     '</section>'
   );
 }
+
+// Header counts: the numbers at the top of the page and in each brand cell
+// count Needs-reply threads only. Bulk and spam are counted in their own
+// section headers (renderSection), never in these.
+const needsReply = (threads) => threads.filter((t) => tierOf(t) === 'customer');
+
+/** { open, over24h } for the page header. `now` is unix seconds. */
+export function headerCounts(threads, now) {
+  const mine = needsReply(threads);
+  return {
+    open: mine.length,
+    over24h: mine.filter((t) => t.awaiting_since != null && now - t.awaiting_since > 24 * 3600).length,
+  };
+}
+
+/** { count, oldest } for one brand × channel cell. oldest is the earliest awaiting_since, or null. */
+export function brandCell(threads, brandId, channel) {
+  const cell = needsReply(threads).filter((t) => t.brand_id === brandId && t.channel === channel);
+  const since = cell.map((t) => t.awaiting_since).filter((x) => x != null);
+  return { count: cell.length, oldest: since.length ? Math.min(...since) : null };
+}

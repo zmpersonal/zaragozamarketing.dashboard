@@ -299,7 +299,7 @@
 </div>
 
 <script type="module">
-import { sectionThreads, renderSection } from './queue-sections.mjs';
+import { sectionThreads, renderSection, headerCounts, brandCell } from './queue-sections.mjs';
 
 // ---------------------------------------------------------------
 // Mock data. Delete MOCK and flip USE_API once D1 is seeded —
@@ -467,9 +467,9 @@ function renderMatrix() {
     tr.append(th);
 
     for (const channel of ['email', 'phone', 'chat']) {
-      const cell = rows.filter((t) => t.brand_id === brand.id && t.channel === channel);
-      const since = cell.map((t) => t.awaiting_since).filter((x) => x != null);
-      const oldest = since.length ? Math.min(...since) : null;
+      // Needs-reply only: bulk and spam are counted in their own sections.
+      const { count, oldest } = brandCell(rows, brand.id, channel);
+      const cell = { length: count };
       const hrs = oldest ? ageHours(oldest) : 0;
       // 48h fills the bar. Anything past that is already as loud as it gets.
       const fill = Math.min(100, (hrs / 48) * 100);
@@ -499,10 +499,10 @@ function renderQueue() {
 
   document.getElementById('title').textContent =
     state.view === 'mine' ? 'My queue' : 'Waiting on us';
-  const total = openThreads().length;
-  const over = openThreads().filter((t) => waitHours(t) > 24).length;
+  // Needs-reply only: bulk and spam have their own counts in their section headers.
+  const { open: total, over24h: over } = headerCounts(openThreads(), NOW());
   document.getElementById('subtitle').textContent =
-    total + ' open across all brands' + (over ? ', ' + over + ' past 24 hours' : '');
+    total + ' need a reply across all brands' + (over ? ', ' + over + ' past 24 hours' : '');
   document.getElementById('synced').textContent = 'Synced just now';
 
   if (!rows.length) {
