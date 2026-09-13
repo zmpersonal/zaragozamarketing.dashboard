@@ -75,11 +75,44 @@ export function oldestUnanswered(timeline: Observed[]): number | null {
  * the next sync, and lets partial sources like Quo (which only report the
  * latest activity) keep the start of a run of unanswered texts.
  */
-export function resolveState(existing: Existing | null, observed: Observed[]): ResolvedState {
+/** The observed timeline plus a contact the agent logged and resolved (see resolveState). */
+function effectiveTimeline(existing: Existing | null, observed: Observed[]): Observed[] {
   const resolvedContact = existing?.last_outbound_at != null && existing.awaiting_since === null;
-  const timeline = resolvedContact
+  return resolvedContact
     ? [...observed, { at: existing.last_outbound_at as number, inbound: false }]
     : observed;
+}
+
+export interface CompletedWait {
+  awaiting_since: number;
+  responded_at: number;
+}
+
+/**
+ * Waits on us that this observation shows ended: an open wait (the stored
+ * awaiting_since, or an inbound newer than anything already recorded)
+ * followed by an outbound. Includes waits that began and ended between two
+ * syncs, which never set awaiting_since. Messages at or before the stored
+ * last_inbound_at were handled by earlier syncs and do not start a wait.
+ * Idempotent across re-syncs when stored with UNIQUE(thread, awaiting_since).
+ */
+export function completedWaits(existing: Existing | null, observed: Observed[]): CompletedWait[] {
+  const out: CompletedWait[] = [];
+  let open = existing?.awaiting_since ?? null;
+  const seen = existing?.last_inbound_at ?? -Infinity;
+  for (const m of chronological(effectiveTimeline(existing, observed))) {
+    if (m.inbound) {
+      if (open === null && m.at > seen) open = m.at;
+    } else if (open !== null && m.at >= open) {
+      out.push({ awaiting_since: open, responded_at: m.at });
+      open = null;
+    }
+  }
+  return out;
+}
+
+export function resolveState(existing: Existing | null, observed: Observed[]): ResolvedState {
+  const timeline = effectiveTimeline(existing, observed);
 
   if (existing?.status === 'closed') {
     const fresh = chronological(timeline).filter((m) => m.at > existing.last_inbound_at);

@@ -8,7 +8,29 @@
  * write is skipped and the next cron run resolves again from fresh data,
  * so ingest can never clobber a status a human just set.
  */
-import { resolveState, type Existing, type Observed } from '../lib/thread-state.ts';
+import { completedWaits, resolveState, type Existing, type Observed } from '../lib/thread-state.ts';
+import { businessMinutes } from '../lib/clock.ts';
+
+/**
+ * Store one response measurement. INSERT OR IGNORE on UNIQUE(thread_id,
+ * awaiting_since): the same wait is only ever measured once, whether ingest
+ * or an agent saw it end first.
+ */
+export function responseInsert(
+  db: D1Database, threadId: string, awaitingSince: number, respondedAt: number,
+  via: 'message' | 'replied' | 'called' | 'closed', actor: string, now: number,
+): D1PreparedStatement {
+  return db.prepare(
+    `INSERT OR IGNORE INTO response (thread_id, awaiting_since, responded_at, business_minutes, via, actor, created_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+  ).bind(threadId, awaitingSince, respondedAt, businessMinutes(awaitingSince, respondedAt), via, actor, now);
+}
+
+async function recordWaits(db: D1Database, threadId: string, existing: Existing | null, timeline: Observed[], now: number) {
+  const waits = completedWaits(existing, timeline);
+  if (!waits.length) return;
+  await db.batch(waits.map((w) => responseInsert(db, threadId, w.awaiting_since, w.responded_at, 'message', 'system', now)));
+}
 
 export interface ThreadObservation {
   id: string;
@@ -51,7 +73,9 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
       o.preview, state.status, o.is_automated ?? 0, o.conversation_started_at,
       o.newest_inbound_at ?? o.conversation_started_at, o.newest_outbound_at, state.awaiting_since,
     ).run();
-    return res.meta.changes > 0 ? 'inserted' : 'skipped';
+    if (res.meta.changes === 0) return 'skipped';
+    await recordWaits(db, o.id, null, o.timeline, now);
+    return 'inserted';
   }
 
   // conversation_started_at is deliberately absent: it never changes after insert.
@@ -86,6 +110,7 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
   ).run();
 
   if (res.meta.changes === 0) return 'skipped';
+  await recordWaits(db, o.id, existing, o.timeline, now);
 
   if (state.reopened) {
     await db.prepare(

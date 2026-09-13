@@ -8,7 +8,7 @@
 
 import { ingestGmail } from './ingest/gmail.ts';
 import { ingestQuo } from './ingest/quo.ts';
-import { rescueThread } from './db/threads.ts';
+import { rescueThread, responseInsert } from './db/threads.ts';
 import { verifyQuoWebhook, webhookHeaders } from './lib/quo-signature.ts';
 
 export interface Env {
@@ -214,11 +214,12 @@ export default {
       }>();
       if (!b.thread_id || !b.kind) return json({ error: 'thread_id and kind required' }, 400);
 
+      const at = now();
       const batch = [
         env.DB.prepare(
           `INSERT INTO action (thread_id, actor, kind, body, created_at)
            VALUES (?1, ?2, ?3, ?4, ?5)`
-        ).bind(b.thread_id, user.email, b.kind, b.body ?? null, now()),
+        ).bind(b.thread_id, user.email, b.kind, b.body ?? null, at),
       ];
 
       // The agent's chosen status is authoritative. Contact ('replied',
@@ -227,6 +228,18 @@ export default {
       // contact ends the wait only while awaiting_since is cleared
       // (lib/thread-state.ts). Other kinds never touch last_outbound_at.
       const contact = CONTACT_KINDS.has(b.kind);
+
+      // If this action stops the clock, measure the wait it ends first.
+      const stopsClock = b.status === 'closed' || (contact && b.status === 'answered');
+      if (stopsClock) {
+        const current = await env.DB.prepare('SELECT awaiting_since FROM thread WHERE id = ?1')
+          .bind(b.thread_id).first<{ awaiting_since: number | null }>();
+        if (current?.awaiting_since != null) {
+          const via = contact ? (b.kind as 'replied' | 'called') : 'closed';
+          batch.push(responseInsert(env.DB, b.thread_id, current.awaiting_since, at, via, user.email, at));
+        }
+      }
+
       if (b.status || contact) {
         batch.push(
           env.DB.prepare(
@@ -252,7 +265,7 @@ export default {
              WHERE id = ?1`
           ).bind(
             b.thread_id, b.status ?? null, b.blocked_on ?? null, b.blocked_note ?? null,
-            user.email, now(), contact ? 1 : 0
+            user.email, at, contact ? 1 : 0
           )
         );
       }

@@ -108,6 +108,29 @@ CREATE TABLE IF NOT EXISTS action (
 CREATE INDEX IF NOT EXISTS idx_action_thread ON action(thread_id, created_at DESC);
 
 -- ---------------------------------------------------------------
+-- Responses: one row every time a wait on us ends. Append-only, like
+-- action. A column on thread would hold one number and lose history when
+-- a thread reopens; this keeps every measurement for the admin report.
+-- business_minutes is America/Chicago Mon-Fri 08:00-17:00 (lib/clock.ts),
+-- from awaiting_since to responded_at.
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS response (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id        TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+  awaiting_since   INTEGER NOT NULL,         -- the inbound the wait started from
+  responded_at     INTEGER NOT NULL,         -- when the wait ended
+  business_minutes INTEGER NOT NULL,
+  via              TEXT NOT NULL,            -- 'message' (a reply seen by ingest)
+                                             -- | 'replied' | 'called' (logged by an agent, marked answered/closed)
+                                             -- | 'closed' (closed with no contact: not a reply)
+  actor            TEXT NOT NULL,            -- 'system' or the agent's email
+  created_at       INTEGER NOT NULL,
+  -- One measurement per wait: re-syncs and the agent/ingest overlap can't duplicate it.
+  UNIQUE (thread_id, awaiting_since)
+);
+CREATE INDEX IF NOT EXISTS idx_response_time ON response(responded_at);
+
+-- ---------------------------------------------------------------
 -- Sender rules: what the agent taught us by clicking Not customer
 -- or Spam. Applies going forward, and doubles as labelled training
 -- data if we ever want to revisit the rules with a model.
