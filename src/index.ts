@@ -8,6 +8,7 @@
 
 import { ingestGmail } from './ingest/gmail.ts';
 import { ingestQuo } from './ingest/quo.ts';
+import { rescueThread } from './db/threads.ts';
 
 export interface Env {
   DB: D1Database;
@@ -84,7 +85,7 @@ async function board(env: Env) {
   const { results } = await env.DB.prepare(`
     SELECT brand_id, channel,
            COUNT(*)                    AS waiting,
-           MIN(first_inbound_at)       AS oldest_at,
+           MIN(awaiting_since)         AS oldest_at,
            SUM(status = 'blocked')     AS blocked
     FROM thread
     WHERE status IN ('waiting','blocked')
@@ -93,17 +94,21 @@ async function board(env: Env) {
   return results;
 }
 
-/** The queue. Oldest first — age is the only ranking that matters. */
+/**
+ * The queue. Longest-waiting first, measured from awaiting_since (the oldest
+ * unanswered inbound), never first_inbound_at. Threads that are open but not
+ * awaiting us (blocked, already answered) sort after.
+ */
 async function queue(env: Env, user: User, mine: boolean) {
   const sql = `
     SELECT t.id, t.brand_id, t.channel, t.subject, t.customer_name,
            t.customer_handle, t.preview, t.status, t.blocked_on, t.blocked_note,
            t.assignee, t.priority, t.first_inbound_at, t.last_inbound_at,
-           t.is_automated
+           t.awaiting_since, t.is_automated
     FROM thread t
     WHERE t.status IN ('waiting','blocked')
       ${mine ? 'AND (t.assignee = ?1 OR t.assignee IS NULL)' : ''}
-    ORDER BY t.priority DESC, t.first_inbound_at ASC
+    ORDER BY t.priority DESC, t.awaiting_since IS NULL, t.awaiting_since ASC, t.first_inbound_at ASC
     LIMIT 200`;
   const stmt = mine
     ? env.DB.prepare(sql).bind(user.email)
@@ -192,7 +197,9 @@ export default {
              SET status = ?2, blocked_on = ?3, blocked_note = ?4,
                  assignee = COALESCE(assignee, ?5),
                  last_outbound_at = ?6,
-                 closed_at = CASE WHEN ?2 = 'closed' THEN ?6 ELSE NULL END
+                 closed_at = CASE WHEN ?2 = 'closed' THEN ?6 ELSE NULL END,
+                 -- closing means caught up; a later inbound reopens it (db/threads.ts)
+                 awaiting_since = CASE WHEN ?2 = 'closed' THEN NULL ELSE awaiting_since END
              WHERE id = ?1`
           ).bind(
             b.thread_id, b.status, b.blocked_on ?? null, b.blocked_note ?? null,
@@ -202,6 +209,14 @@ export default {
       }
       await env.DB.batch(batch);
       return json({ ok: true });
+    }
+
+    // Rescue a demoted thread into the queue. Triage verdict only: arrival
+    // time and awaiting_since are untouched, so the clock stays honest.
+    if (req.method === 'POST' && path.startsWith('threads/') && path.endsWith('/rescue')) {
+      const id = decodeURIComponent(path.slice('threads/'.length, -'/rescue'.length));
+      const found = await rescueThread(env.DB, id, user.email, now());
+      return found ? json({ ok: true }) : json({ error: 'No such thread' }, 404);
     }
 
     if (req.method === 'POST' && path === 'todos') {

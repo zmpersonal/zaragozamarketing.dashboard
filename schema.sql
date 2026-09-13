@@ -52,10 +52,16 @@ CREATE TABLE IF NOT EXISTS thread (
   assignee        TEXT,                    -- agent email, null = unassigned
   priority        INTEGER NOT NULL DEFAULT 0,  -- 0 normal, 1 high, 2 urgent
 
-  first_inbound_at  INTEGER NOT NULL,      -- unix seconds — drives "waiting how long"
+  first_inbound_at  INTEGER NOT NULL,      -- unix seconds — when the conversation began.
+                                           -- Set on insert, never updated.
   last_inbound_at   INTEGER NOT NULL,
   last_outbound_at  INTEGER,
   closed_at         INTEGER,
+
+  -- The oldest inbound message with no outbound after it. NULL when we are
+  -- caught up. The response clock runs from here, never from first_inbound_at.
+  -- A new inbound on a closed thread reopens it and sets this to that message.
+  awaiting_since    INTEGER,
 
   is_automated    INTEGER NOT NULL DEFAULT 0,  -- answered by chat AI, not a human
 
@@ -66,9 +72,9 @@ CREATE TABLE IF NOT EXISTS thread (
   triage_signals  TEXT,                    -- JSON array of reason codes
   triage_by       TEXT,                    -- agent email if a human set it
 
-  -- response clock, measured in BUSINESS minutes (America/Chicago, Mon-Fri 8-5).
-  -- first_inbound_at is always arrival time, never the moment a demoted
-  -- message got rescued, or the filter would launder slow responses.
+  -- response clock, measured in BUSINESS minutes (America/Chicago, Mon-Fri 8-5)
+  -- from awaiting_since. Rescuing a demoted message changes triage only, never
+  -- first_inbound_at or awaiting_since, or the filter would launder slow responses.
   first_response_mins INTEGER,
 
   stage           TEXT,                    -- where this customer is in the process
@@ -76,7 +82,7 @@ CREATE TABLE IF NOT EXISTS thread (
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_open
-  ON thread(triage, status, first_inbound_at) WHERE status IN ('waiting','blocked');
+  ON thread(triage, status, awaiting_since) WHERE status IN ('waiting','blocked');
 CREATE INDEX IF NOT EXISTS idx_thread_brand ON thread(brand_id, channel, status);
 CREATE INDEX IF NOT EXISTS idx_thread_assignee ON thread(assignee, status);
 
@@ -91,6 +97,8 @@ CREATE TABLE IF NOT EXISTS action (
   kind        TEXT NOT NULL,
               -- 'replied' | 'called' | 'note' | 'status_change'
               -- | 'assigned' | 'escalated' | 'refunded'
+              -- | 'rescued' (agent moved a demoted thread into the queue)
+              -- | 'reopened' (actor 'system': new inbound after close)
   body        TEXT,                        -- what was said / what happened
   created_at  INTEGER NOT NULL
 );

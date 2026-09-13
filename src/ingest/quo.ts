@@ -4,6 +4,7 @@
  * The cron is the safety net. Webhooks in /hooks/quo are the fast path.
  */
 import type { Env } from '../index.ts';
+import { syncThread } from '../db/threads.ts';
 
 const API = 'https://api.quo.com/';
 const API_VERSION = '2026-03-30';
@@ -36,28 +37,26 @@ export async function ingestQuo(env: Env) {
         const at = Math.floor(new Date(c.lastActivityAt ?? c.updatedAt).getTime() / 1000);
         const inbound = c.lastActivityDirection === 'incoming';
 
-        await env.DB.prepare(`
-          INSERT INTO thread (
-            id, source_id, brand_id, channel, subject, customer_name,
-            customer_handle, preview, status, first_inbound_at,
-            last_inbound_at, last_outbound_at
-          ) VALUES (?1,?2,?3,'phone',?4,?5,?6,?7,?8,?9,?10,?11)
-          ON CONFLICT(id) DO UPDATE SET
-            preview = excluded.preview,
-            last_inbound_at = MAX(thread.last_inbound_at, excluded.last_inbound_at),
-            status = CASE
-              WHEN thread.status IN ('blocked','closed') THEN thread.status
-              ELSE excluded.status
-            END
-        `).bind(
-          `quo:${c.id}`, src.id, src.brand_id,
-          c.lastActivityType === 'call' ? 'Call' : 'Text',
-          c.name ?? null,
-          c.participants?.[0] ?? null,
-          (c.previewText ?? '').slice(0, 200),
-          inbound ? 'waiting' : 'answered',
-          at, at, inbound ? null : at
-        ).run();
+        // Quo's conversation list only reports the LATEST activity, so the
+        // timeline is one event. lib/thread-state.ts holds an existing
+        // awaiting_since across polls, which is what keeps the start of a run
+        // of unanswered texts. first_inbound_at is when we first saw the
+        // conversation, not necessarily its first message.
+        await syncThread(env.DB, {
+          id: `quo:${c.id}`,
+          source_id: src.id,
+          brand_id: src.brand_id,
+          channel: 'phone',
+          subject: c.lastActivityType === 'call' ? 'Call' : 'Text',
+          customer_name: c.name ?? null,
+          customer_handle: c.participants?.[0] ?? null,
+          refresh_customer: false,
+          preview: (c.previewText ?? '').slice(0, 200),
+          started_at: at,
+          newest_inbound_at: inbound ? at : null,
+          newest_outbound_at: inbound ? null : at,
+          timeline: [{ at, inbound }],
+        }, Math.floor(Date.now() / 1000));
       }
 
       await env.DB.prepare(`UPDATE source SET last_synced_at = ?2 WHERE id = ?1`)

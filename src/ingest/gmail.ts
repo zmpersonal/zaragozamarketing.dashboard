@@ -1,12 +1,15 @@
 /**
  * Gmail ingest — the "email scan", running on a cron for every mailbox.
  *
- * Scans each connected mailbox, upserts a thread row per conversation, and
- * decides waiting vs answered by looking at the direction of the LAST
- * message. That single rule is what makes the board honest.
+ * Scans each connected mailbox and syncs a thread row per conversation.
+ * Status and awaiting_since come from the full message timeline via
+ * lib/thread-state.ts: waiting while any inbound message has no reply
+ * after it, answered once the last word is ours.
  */
 import type { Env } from '../index.ts';
 import { emailOf } from '../lib/triage.ts';
+import type { Observed } from '../lib/thread-state.ts';
+import { syncThread } from '../db/threads.ts';
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 
@@ -49,7 +52,6 @@ export async function ingestGmail(env: Env) {
         const msgs = t.messages ?? [];
         if (!msgs.length) continue;
 
-        const last = msgs[msgs.length - 1];
         const header = (m: any, name: string) =>
           m.payload.headers.find((h: any) => h.name.toLowerCase() === name)?.value ?? '';
 
@@ -67,39 +69,31 @@ export async function ingestGmail(env: Env) {
         if (!firstIn) continue; // nothing inbound: not a customer conversation
 
         const customerFrom = header(firstIn, 'from');
-        const inbound = isInbound(last);
-        const firstAt = Math.floor(Number(msgs[0].internalDate) / 1000);
-        const lastAt = Math.floor(Number(last.internalDate) / 1000);
+        const secs = (m: any) => Math.floor(Number(m.internalDate) / 1000);
 
-        // Never clobber a status a human set. If the agent marked it
-        // blocked, an unchanged mailbox shouldn't flip it back to waiting.
-        await env.DB.prepare(`
-          INSERT INTO thread (
-            id, source_id, brand_id, channel, subject, customer_name,
-            customer_handle, preview, status, first_inbound_at,
-            last_inbound_at, last_outbound_at
-          ) VALUES (?1,?2,?3,'email',?4,?5,?6,?7,?8,?9,?10,?11)
-          ON CONFLICT(id) DO UPDATE SET
-            customer_name   = excluded.customer_name,
-            customer_handle = excluded.customer_handle,
-            preview        = excluded.preview,
-            last_inbound_at  = MAX(thread.last_inbound_at, excluded.last_inbound_at),
-            last_outbound_at = MAX(COALESCE(thread.last_outbound_at,0), COALESCE(excluded.last_outbound_at,0)),
-            status = CASE
-              WHEN thread.status IN ('blocked','closed') THEN thread.status
-              ELSE excluded.status
-            END
-        `).bind(
-          `gmail:${t.id}`, src.id, src.brand_id,
-          header(msgs[0], 'subject') || '(no subject)',
-          customerFrom.replace(/<.*/, '').replace(/"/g, '').trim(),
-          emailOf(customerFrom),
-          (t.snippet ?? '').slice(0, 200),
-          inbound ? 'waiting' : 'answered',
-          firstAt,
-          inbound ? lastAt : firstAt,
-          inbound ? null : lastAt
-        ).run();
+        // Gmail returns the whole thread, so the timeline is complete and
+        // lib/thread-state.ts can decide status and awaiting_since exactly.
+        const timeline: Observed[] = msgs.map((m: any) => ({ at: secs(m), inbound: isInbound(m) }));
+        const newest = (inbound: boolean): number | null => {
+          const times = timeline.filter((m) => m.inbound === inbound).map((m) => m.at);
+          return times.length ? Math.max(...times) : null;
+        };
+
+        await syncThread(env.DB, {
+          id: `gmail:${t.id}`,
+          source_id: src.id,
+          brand_id: src.brand_id,
+          channel: 'email',
+          subject: header(msgs[0], 'subject') || '(no subject)',
+          customer_name: customerFrom.replace(/<.*/, '').replace(/"/g, '').trim(),
+          customer_handle: emailOf(customerFrom),
+          refresh_customer: true,
+          preview: (t.snippet ?? '').slice(0, 200),
+          started_at: secs(msgs[0]),
+          newest_inbound_at: newest(true),
+          newest_outbound_at: newest(false),
+          timeline,
+        }, Math.floor(Date.now() / 1000));
       }
 
       await env.DB.prepare(`UPDATE source SET last_synced_at = ?2 WHERE id = ?1`)

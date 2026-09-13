@@ -299,27 +299,27 @@ const MOCK = {
   threads: [
     { id: 'gmail:1', brand_id: 'inhouse', channel: 'email', subject: 'Sauna heater tripping the breaker',
       customer_name: 'Dana Reyes', customer_handle: 'dana@…', status: 'waiting', assignee: null,
-      first_inbound_at: h(41), preview: 'Third time this week. It runs about twenty minutes then cuts out.' },
+      first_inbound_at: h(41), awaiting_since: h(41), preview: 'Third time this week. It runs about twenty minutes then cuts out.' },
     { id: 'quo:1', brand_id: 'inhouse', channel: 'phone', subject: 'Missed call',
       customer_name: 'Marcus Bell', customer_handle: '+1 512 555 0142', status: 'waiting', assignee: null,
-      first_inbound_at: h(29), preview: 'Voicemail: asking about the chiller warranty.' },
+      first_inbound_at: h(29), awaiting_since: h(29), preview: 'Voicemail: asking about the chiller warranty.' },
     { id: 'gmail:2', brand_id: 'caliza', channel: 'email', subject: 'Invoice 2214 — wrong PO number',
       customer_name: 'Priya Raman', customer_handle: 'ap@…', status: 'blocked', blocked_on: 'owner',
       blocked_note: 'Needs Julian to confirm the revised PO before we reissue.',
-      assignee: 'agent@inhousewellness.com', first_inbound_at: h(19), preview: 'Our AP system rejected it.' },
+      assignee: 'agent@inhousewellness.com', first_inbound_at: h(19), awaiting_since: null, preview: 'Our AP system rejected it.' },
     { id: 'chat:1', brand_id: 'inhouse', channel: 'chat', subject: 'Plunge chiller sizing',
       customer_name: 'Visitor', customer_handle: 'chat', status: 'waiting', assignee: null,
-      first_inbound_at: h(7), is_automated: 1, preview: 'Bot answered sizing, then they asked about 220v wiring.' },
+      first_inbound_at: h(7), awaiting_since: h(7), is_automated: 1, preview: 'Bot answered sizing, then they asked about 220v wiring.' },
     { id: 'gmail:3', brand_id: 'thi', channel: 'email', subject: 'Reschedule install — Thursday?',
       customer_name: 'Ken Ito', customer_handle: 'ken@…', status: 'waiting',
-      assignee: 'agent@inhousewellness.com', first_inbound_at: h(5), preview: 'Any chance we move to Thursday morning.' },
+      assignee: 'agent@inhousewellness.com', first_inbound_at: h(5), awaiting_since: h(5), preview: 'Any chance we move to Thursday morning.' },
     { id: 'gmail:4', brand_id: 'reachjulian', channel: 'email', subject: 'Podcast booking request',
       customer_name: 'Sam Ortiz', customer_handle: 'sam@…', status: 'waiting', assignee: null,
-      first_inbound_at: h(2), preview: 'Pitching a guest for the December run.' },
+      first_inbound_at: h(2), awaiting_since: h(2), preview: 'Pitching a guest for the December run.' },
     { id: 'quo:2', brand_id: 'caliza', channel: 'phone', subject: 'Text',
       customer_name: 'Rosa Lim', customer_handle: '+1 737 555 0198', status: 'blocked', blocked_on: 'shipping',
       blocked_note: 'Carrier claim filed, waiting on their inspection.',
-      assignee: null, first_inbound_at: h(63), preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
+      assignee: null, first_inbound_at: h(63), awaiting_since: null, preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
   ],
   actions: {
     'gmail:2': [
@@ -355,6 +355,15 @@ const api = async (path, opts) => {
 const NOW = () => Math.floor(Date.now() / 1000);
 const ageHours = (t) => (NOW() - t) / 3600;
 
+// Every age on this page runs from awaiting_since (the oldest inbound we have
+// not answered), never first_inbound_at. null = not waiting on us.
+// TODO: still wall-clock hours; must become business minutes (CLAUDE.md invariant 5).
+const waitHours = (t) => (t.awaiting_since == null ? null : ageHours(t.awaiting_since));
+const longestWaitingFirst = (a, b) =>
+  (a.awaiting_since ?? Infinity) === (b.awaiting_since ?? Infinity)
+    ? a.first_inbound_at - b.first_inbound_at
+    : (a.awaiting_since ?? Infinity) < (b.awaiting_since ?? Infinity) ? -1 : 1;
+
 function ageLabel(t) {
   const hrs = ageHours(t);
   if (hrs < 1) return Math.max(1, Math.round(hrs * 60)) + 'm';
@@ -377,8 +386,8 @@ function visibleThreads() {
   if (state.brand) rows = rows.filter((t) => t.brand_id === state.brand);
   if (state.filter === 'unassigned') rows = rows.filter((t) => !t.assignee);
   if (state.filter === 'blocked') rows = rows.filter((t) => t.status === 'blocked');
-  if (state.filter === 'overdue') rows = rows.filter((t) => ageHours(t.first_inbound_at) > 24);
-  return rows.sort((a, b) => a.first_inbound_at - b.first_inbound_at);
+  if (state.filter === 'overdue') rows = rows.filter((t) => waitHours(t) > 24);
+  return rows.sort(longestWaitingFirst);
 }
 
 // ---------------------------------------------------------------
@@ -412,7 +421,8 @@ function renderMatrix() {
 
     for (const channel of ['email', 'phone', 'chat']) {
       const cell = rows.filter((t) => t.brand_id === brand.id && t.channel === channel);
-      const oldest = cell.length ? Math.min(...cell.map((t) => t.first_inbound_at)) : null;
+      const since = cell.map((t) => t.awaiting_since).filter((x) => x != null);
+      const oldest = since.length ? Math.min(...since) : null;
       const hrs = oldest ? ageHours(oldest) : 0;
       // 48h fills the bar. Anything past that is already as loud as it gets.
       const fill = Math.min(100, (hrs / 48) * 100);
@@ -422,7 +432,7 @@ function renderMatrix() {
       btn.className = 'cell' + (cell.length ? '' : ' quiet');
       btn.innerHTML =
         '<div class="count num">' + (cell.length || '—') + '</div>' +
-        '<div class="oldest">' + (oldest ? 'oldest ' + ageLabel(oldest) : 'clear') + '</div>' +
+        '<div class="oldest">' + (oldest ? 'oldest ' + ageLabel(oldest) : cell.length ? 'none awaiting us' : 'clear') + '</div>' +
         '<div class="heat"><span style="width:' + fill + '%;background:' +
           heatColor(hrs) + '"></span></div>';
       btn.onclick = () => { state.brand = brand.id; state.filter = 'all'; render(); };
@@ -443,7 +453,7 @@ function renderQueue() {
   document.getElementById('title').textContent =
     state.view === 'mine' ? 'My queue' : 'Waiting on us';
   const total = openThreads().length;
-  const over = openThreads().filter((t) => ageHours(t.first_inbound_at) > 24).length;
+  const over = openThreads().filter((t) => waitHours(t) > 24).length;
   document.getElementById('subtitle').textContent =
     total + ' open across all brands' + (over ? ', ' + over + ' past 24 hours' : '');
   document.getElementById('synced').textContent = 'Synced just now';
@@ -455,14 +465,14 @@ function renderQueue() {
   }
 
   for (const t of rows) {
-    const hrs = ageHours(t.first_inbound_at);
+    const hrs = waitHours(t) ?? 0;
     const el = document.createElement('button');
     el.className = 'row';
     el.setAttribute('aria-selected', String(state.selected === t.id));
     el.innerHTML =
       '<span class="edge" style="background:' + heatColor(hrs) + '"></span>' +
       '<span class="age num" style="color:' + heatColor(hrs) + '">' +
-        ageLabel(t.first_inbound_at) + '</span>' +
+        (t.awaiting_since == null ? '—' : ageLabel(t.awaiting_since)) + '</span>' +
       '<span class="body">' +
         '<span class="subject">' + esc(t.subject) + '</span><br>' +
         '<span class="from">' + esc(t.customer_name ?? t.customer_handle ?? '') +
@@ -550,6 +560,7 @@ function threadDetail(t) {
     Object.assign(t, {
       status: payload.status,
       blocked_on: payload.blocked_on,
+      awaiting_since: payload.status === 'closed' ? null : t.awaiting_since,
       assignee: t.assignee ?? state.user.email,
     });
     if (payload.status !== 'waiting' && payload.status !== 'blocked') state.selected = null;

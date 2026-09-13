@@ -10,6 +10,7 @@
  * "handled" something badly is how you lose a sale quietly.
  */
 import type { Env } from '../index.ts';
+import { syncThread } from '../db/threads.ts';
 
 export interface NormalisedChat {
   externalId: string;
@@ -23,29 +24,29 @@ export interface NormalisedChat {
 }
 
 export async function upsertChat(env: Env, sourceId: string, c: NormalisedChat) {
-  await env.DB.prepare(`
-    INSERT INTO thread (
-      id, source_id, brand_id, channel, subject, customer_name,
-      customer_handle, preview, status, is_automated,
-      first_inbound_at, last_inbound_at
-    ) VALUES (?1,?2,?3,'chat',?4,?5,'chat',?6,?7,?8,?9,?10)
-    ON CONFLICT(id) DO UPDATE SET
-      preview = excluded.preview,
-      last_inbound_at = MAX(thread.last_inbound_at, excluded.last_inbound_at),
-      is_automated = excluded.is_automated,
-      status = CASE
-        WHEN thread.status IN ('blocked','closed') THEN thread.status
-        ELSE excluded.status
-      END
-  `).bind(
-    `chat:${c.externalId}`, sourceId, c.brandId,
-    'Chat — ' + c.preview.slice(0, 40),
-    c.visitorName ?? 'Visitor',
-    c.preview.slice(0, 200),
-    c.awaitingHuman ? 'waiting' : 'answered',
-    c.handledByBot ? 1 : 0,
-    c.startedAt, c.lastInboundAt
-  ).run();
+  // The provider reports a state, not a message history. Model it as the
+  // latest visitor message, followed by a reply at the same instant when
+  // nobody is waiting on a human, so lib/thread-state.ts applies the same
+  // waiting / reopen rules as email and phone.
+  const timeline = [{ at: c.lastInboundAt, inbound: true }];
+  if (!c.awaitingHuman) timeline.push({ at: c.lastInboundAt, inbound: false });
+
+  await syncThread(env.DB, {
+    id: `chat:${c.externalId}`,
+    source_id: sourceId,
+    brand_id: c.brandId,
+    channel: 'chat',
+    subject: 'Chat — ' + c.preview.slice(0, 40),
+    customer_name: c.visitorName ?? 'Visitor',
+    customer_handle: 'chat',
+    refresh_customer: false,
+    preview: c.preview.slice(0, 200),
+    started_at: c.startedAt,
+    newest_inbound_at: c.lastInboundAt,
+    newest_outbound_at: null,
+    timeline,
+    is_automated: c.handledByBot ? 1 : 0,
+  }, Math.floor(Date.now() / 1000));
 }
 
 /** Example adapter. Replace the field names once the provider is chosen. */
