@@ -43,3 +43,21 @@ test('after a voicemail the customer writes again: the clock still runs from the
   assert.equal(s.status, 'waiting');
   assert.equal(s.awaiting_since, T0);
 });
+
+test('blocked + new inbound -> waiting and flagged unblocked; blocked + nothing new -> stays blocked', () => {
+  const fresh = resolveState(
+    { status: 'blocked', last_inbound_at: T0, last_outbound_at: CALL, awaiting_since: null },
+    [{ at: T0, inbound: true }, { at: LATER, inbound: true }],
+  );
+  assert.equal(fresh.status, 'waiting');
+  assert.equal(fresh.awaiting_since, LATER);
+  assert.equal(fresh.unblocked, true);
+
+  const quiet = resolveState(
+    { status: 'blocked', last_inbound_at: T0, last_outbound_at: null, awaiting_since: T0 },
+    [{ at: T0, inbound: true }],
+  );
+  assert.equal(quiet.status, 'blocked');
+  assert.equal(quiet.awaiting_since, T0);
+  assert.ok(!quiet.unblocked);
+});

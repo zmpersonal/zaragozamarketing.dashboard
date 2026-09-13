@@ -71,3 +71,28 @@ test('queue: waiting threads first by awaiting_since, then blocked by blocked_si
   ]);
   assert.equal(threads.find((t) => t.id === 'gmail:blocked-6d').blocked_since, n - 6 * DAY);
 });
+
+test('a customer chasing a blocked thread moves it out of the blocked group in the queue', async () => {
+  const env = makeApiEnv();
+  env.GOOGLE_CLIENT_ID = 'x.apps.googleusercontent.com';
+  env.GOOGLE_CLIENT_SECRET = 's';
+  env.GOOGLE_REFRESH_TOKENS = JSON.stringify({ [MAILBOX]: 'r' });
+  const n = nowSec();
+  insertThread(env, { id: 'gmail:waiting-1h', awaiting_since: n - 1 * HOUR });
+  insertThread(env, { id: 'gmail:blocked-6d', status: 'blocked', awaiting_since: null, blocked_since: n - 6 * DAY });
+  const mailbox = { t1: [inbound(new Date((n - 30 * HOUR) * 1000).toISOString(), 'Dana <dana@example.com>')] };
+  await withGmail(mailbox, () => ingestGmail(env));
+  await act(env, { thread_id: 'gmail:t1', kind: 'replied', status: 'answered' });
+  await act(env, { thread_id: 'gmail:t1', kind: 'note', status: 'blocked', blocked_on: 'shipping' });
+
+  // Dana chases AFTER the agent's reply and block (dated 1 minute ahead, whole seconds like Gmail).
+  mailbox.t1.push(inbound(new Date((nowSec() + 60) * 1000).toISOString(), 'Dana <dana@example.com>'));
+  await withGmail(mailbox, () => ingestGmail(env));
+
+  const threads = (await (await send(env, 'queue', { email: OWNER })).json()).threads;
+  const t1 = threads.find((t) => t.id === 'gmail:t1');
+  assert.equal(t1.status, 'waiting');
+  assert.equal(t1.blocked_on, 'shipping');
+  assert.deepEqual(threads.map((t) => t.id), ['gmail:waiting-1h', 'gmail:t1', 'gmail:blocked-6d'],
+    'Dana is in the waiting group (by awaiting_since), above every blocked thread');
+});

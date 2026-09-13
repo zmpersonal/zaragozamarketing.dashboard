@@ -126,21 +126,43 @@ test('guard: closed thread with nothing new stays closed and is not awaiting', a
   assert.equal(t.awaiting_since, null);
 });
 
-test('guard: new inbound on a BLOCKED thread keeps it blocked, but the clock starts', async () => {
+test('new inbound on a BLOCKED thread: back to waiting, clock from that message, blocked_on kept as context', async () => {
   const env = makeEnv();
   const mailbox = { t1: [inbound(T0, DANA), outbound(T1)] };
   await withGmail(mailbox, () => ingestGmail(env));
-  await env.DB.prepare(`UPDATE thread SET status = 'blocked', blocked_on = 'supplier' WHERE id = 'gmail:t1'`).run();
+  await env.DB.prepare(`UPDATE thread SET status = 'blocked', blocked_on = 'supplier',
+    blocked_note = 'Waiting on replacement heater', blocked_since = ?1 WHERE id = 'gmail:t1'`).bind(at(T1) + 60).run();
 
   mailbox.t1.push(inbound(T2, DANA));
   await withGmail(mailbox, () => ingestGmail(env));
 
   const t = await row(env, 't1');
-  assert.equal(t.status, 'blocked');
+  assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T2));
+  assert.equal(t.blocked_on, 'supplier', 'kept so the agent sees what it was stuck on');
+  assert.equal(t.blocked_note, 'Waiting on replacement heater');
+  assert.equal(t.blocked_since, null, 'no longer blocked, so no blocked age');
+  const log = await env.DB.prepare(`SELECT actor, kind, body FROM action WHERE thread_id = 'gmail:t1'`).all();
+  assert.equal(log.results.length, 1);
+  assert.equal(log.results[0].actor, 'system');
+  assert.equal(log.results[0].kind, 'unblocked');
+  assert.match(log.results[0].body, /supplier/);
 });
 
-// --- Quo and chat follow the same rules ---------------------------------------
+test('guard: a BLOCKED thread with nothing new stays blocked, even with an older unanswered message', async () => {
+  const env = makeEnv();
+  const mailbox = { t1: [inbound(T0, DANA)] };
+  await withGmail(mailbox, () => ingestGmail(env));
+  await env.DB.prepare(`UPDATE thread SET status = 'blocked', blocked_on = 'refund', blocked_since = ?1 WHERE id = 'gmail:t1'`).bind(at(T1)).run();
+
+  await withGmail(mailbox, () => ingestGmail(env));
+  await withGmail(mailbox, () => ingestGmail(env));
+
+  const t = await row(env, 't1');
+  assert.equal(t.status, 'blocked');
+  assert.equal(t.blocked_since, at(T1));
+  assert.equal(t.awaiting_since, at(T0));
+});
 
 // Quo polls messages since a cursor (tests/quo-ingest.test.mjs covers the
 // interleaving cases); these check it applies the same first-contact and

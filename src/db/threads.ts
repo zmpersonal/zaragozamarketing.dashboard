@@ -29,7 +29,7 @@ export interface ThreadObservation {
   is_automated?: 0 | 1;
 }
 
-export type SyncResult = 'inserted' | 'updated' | 'reopened' | 'skipped';
+export type SyncResult = 'inserted' | 'updated' | 'reopened' | 'unblocked' | 'skipped';
 
 export async function syncThread(db: D1Database, o: ThreadObservation, now: number): Promise<SyncResult> {
   const existing = await db
@@ -68,7 +68,10 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
                            ELSE last_outbound_at
                          END,
       status           = ?9,
-      awaiting_since   = ?10
+      awaiting_since   = ?10,
+      -- leaving 'blocked' because the customer chased: no blocked age, but
+      -- blocked_on / blocked_note stay as context for the agent
+      blocked_since    = CASE WHEN ?15 THEN NULL ELSE blocked_since END
     WHERE id = ?1
       AND status = ?11
       AND awaiting_since IS ?12
@@ -79,15 +82,26 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
     o.is_automated ?? null, o.newest_inbound_at, o.newest_outbound_at,
     state.status, state.awaiting_since,
     existing.status, existing.awaiting_since, existing.last_inbound_at, existing.last_outbound_at,
+    state.unblocked ? 1 : 0,
   ).run();
 
   if (res.meta.changes === 0) return 'skipped';
-  if (!state.reopened) return 'updated';
 
-  await db.prepare(
-    `INSERT INTO action (thread_id, actor, kind, body, created_at) VALUES (?1, 'system', 'reopened', ?2, ?3)`
-  ).bind(o.id, 'New inbound message after the thread was closed.', now).run();
-  return 'reopened';
+  if (state.reopened) {
+    await db.prepare(
+      `INSERT INTO action (thread_id, actor, kind, body, created_at) VALUES (?1, 'system', 'reopened', ?2, ?3)`
+    ).bind(o.id, 'New inbound message after the thread was closed.', now).run();
+    return 'reopened';
+  }
+  if (state.unblocked) {
+    await db.prepare(
+      `INSERT INTO action (thread_id, actor, kind, body, created_at)
+       SELECT ?1, 'system', 'unblocked', 'Customer wrote again while blocked on ' || COALESCE(blocked_on, 'something') || '.', ?2
+       FROM thread WHERE id = ?1`
+    ).bind(o.id, now).run();
+    return 'unblocked';
+  }
+  return 'updated';
 }
 
 /**

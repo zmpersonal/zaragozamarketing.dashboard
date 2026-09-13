@@ -29,7 +29,10 @@ export interface Existing {
 export interface ResolvedState {
   status: 'waiting' | 'answered' | 'blocked' | 'closed';
   awaiting_since: number | null;
+  /** closed -> open because of a new inbound */
   reopened: boolean;
+  /** blocked -> open because of a new inbound (blocked_on is kept as context) */
+  unblocked: boolean;
 }
 
 const chronological = (timeline: Observed[]) =>
@@ -54,7 +57,10 @@ export function oldestUnanswered(timeline: Observed[]): number | null {
  *   last_inbound_at rather than closed_at on purpose: a message that landed
  *   before the agent clicked close, but after the last sync, was never seen
  *   and must still reopen the thread.
- * - blocked: a human set it, so it stays blocked, but the clock still runs.
+ * - blocked: stays blocked while nothing new arrives (the clock still runs).
+ *   A new inbound (newer than the stored last_inbound_at) means the customer
+ *   is chasing us: the thread leaves 'blocked' for waiting (or answered, if
+ *   we already replied since) so a human sees it today.
  * - otherwise: waiting if anything is unanswered, else answered.
  *
  * A contact the agent logged and RESOLVED (awaiting_since cleared, e.g. a
@@ -78,10 +84,10 @@ export function resolveState(existing: Existing | null, observed: Observed[]): R
   if (existing?.status === 'closed') {
     const fresh = chronological(timeline).filter((m) => m.at > existing.last_inbound_at);
     if (!fresh.some((m) => m.inbound)) {
-      return { status: 'closed', awaiting_since: null, reopened: false };
+      return { status: 'closed', awaiting_since: null, reopened: false, unblocked: false };
     }
     const since = oldestUnanswered(fresh);
-    return { status: since === null ? 'answered' : 'waiting', awaiting_since: since, reopened: true };
+    return { status: since === null ? 'answered' : 'waiting', awaiting_since: since, reopened: true, unblocked: false };
   }
 
   let since = oldestUnanswered(timeline);
@@ -91,9 +97,11 @@ export function resolveState(existing: Existing | null, observed: Observed[]): R
   }
 
   if (existing?.status === 'blocked') {
-    return { status: 'blocked', awaiting_since: since, reopened: false };
+    const chased = timeline.some((m) => m.inbound && m.at > existing.last_inbound_at);
+    if (!chased) return { status: 'blocked', awaiting_since: since, reopened: false, unblocked: false };
+    return { status: since === null ? 'answered' : 'waiting', awaiting_since: since, reopened: false, unblocked: true };
   }
-  return { status: since === null ? 'answered' : 'waiting', awaiting_since: since, reopened: false };
+  return { status: since === null ? 'answered' : 'waiting', awaiting_since: since, reopened: false, unblocked: false };
 }
 
 /** Business minutes this thread has been waiting on us, or null if caught up. */
