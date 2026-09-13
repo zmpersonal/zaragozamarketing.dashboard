@@ -10,7 +10,8 @@ not separate projects. **V1 content is InHouse Wellness customer service only.**
 
 It is one Cloudflare Worker (`src/index.ts`) with a D1 database (`schema.sql`) and a static UI
 (`public/index.html`). The Worker serves the UI and `/api/*`, and runs Gmail and Quo ingest
-every 5 minutes. No AI provider sits in the critical path.
+on two 5-minute cron triggers (Gmail at :00/:05…, Quo two minutes later), so each gets its own
+subrequest budget. No AI provider sits in the critical path.
 
 ## Commands
 
@@ -115,10 +116,22 @@ tier is shown, and every non-customer verdict carries its reasons to the UI.
   - Agent-marked spam senders are `spam`.
   - The reason is in HANDOFF, "Why the spam tier exists". Don't fold spam back into bulk.
 - **Exemptions beat every signal, including Gmail spam.** In order:
-  1. owner-verified customers (`src/lib/known-customers.ts`)
-  2. agent-marked real senders (`sender_rule` verdict `customer`)
-  3. senders we've replied to (`known_sender`, and threads with an outbound message)
-  - Tests: `tests/triage-tiers.test.mjs`, including the real `verified.customer@example.com` case.
+  1. verified customers and agent-marked real senders (`sender_rule` verdict `customer`)
+  2. senders we've replied to (`known_sender`, and threads with an outbound message)
+  - Tests: `tests/triage-tiers.test.mjs`, with the round-5 misfiled-customer case on a
+    fabricated address.
+- **Customer addresses never enter the repo** (round 7). Not in code, tests, fixtures, docs or
+  commit messages.
+  - Verified customers are `sender_rule` rows, applied at setup from a seed file kept outside
+    the repo (`seeds/sender_rule.example.sql` shows the shape; `seeds/*` other than
+    `*.example.sql` is gitignored).
+  - Tests use fabricated addresses (`example.com`, `.example`).
+  - `tests/no-personal-addresses.test.mjs` fails on any consumer-mail-domain address (icloud,
+    gmail, yahoo, outlook, hotmail, msn, aol and similar) under `src/`, `tests/`, `public/` or
+    `prove/`.
+  - prove/ scripts that write customer data (`backfill-known-senders.mjs`, `ingest-live.mjs`)
+    refuse a path inside the repo, write mode 600, and print counts, dates, tiers and subjects
+    only.
 - **`classify()` in `src/lib/triage.ts` is pure.** It returns
   `{ tier, demote, score, signals[{code, why, weight}], exemptReason? }`.
   - A bulk score of 2 or more is `bulk`.
@@ -133,11 +146,25 @@ tier is shown, and every non-customer verdict carries its reasons to the UI.
 - **Gmail ingest reads the whole received stream**, the same population as the prove script:
   - query `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats`, with
     `includeSpamTrash=true`
-  - paged to the end, with the query and counts logged
-  - Archived, filtered, spam and trash mail all reach the queue. Never go back to `in:inbox`,
+  - archived, filtered, spam and trash mail all reach the queue. Never go back to `in:inbox`,
     which makes the filter moot.
+- **Gmail ingest is incremental and bounded** (round 7). `source.sync_cursor` holds JSON
+  `{historyId, pending, backfillPageToken}`.
+  - Empty cursor: bounded backfill. Store the profile's `historyId`, list one page of the query,
+    fetch at most `GMAIL_LIMITS.threadsPerRun` threads, keep the rest pending and the page token
+    for later runs.
+  - Stored `historyId`: `history.list` (message added, label added, label removed), fetching
+    only changed threads.
+  - Expired (404) or invalid (400) `historyId`: warn, bounded window listing, re-seed.
+  - A `Budget` (`src/lib/budget.ts`) counts every fetch and D1 statement per invocation and stops
+    before the cap; the rest waits for the next run. Defaults stay under Workers Paid limits,
+    asserted by a test.
+  - Drafts and chats never count as messages, so a saved draft reply isn't a reply.
+  - Tests: `tests/gmail-incremental.test.mjs`, `tests/gmail-population.test.mjs`.
 - **The UI has three sections** (`public/queue-sections.mjs`): Needs reply, Probably not
   customers (with reason chips), and Spam at the bottom with a count.
+  - Header and per-brand counts ("N need a reply", brand cells, `/api/board`) count Needs reply
+    only. Bulk and spam are counted in their own sections. Tests: `tests/header-counts.test.mjs`.
   - Unknown tiers show as Needs reply.
   - The spam section is always expanded, never behind a click. Each row shows the sender
     address and the full subject, never truncated.
@@ -243,13 +270,17 @@ src/ingest/chat.ts        provider-agnostic chat → syncThread (not routed yet)
 src/db/threads.ts         syncThread (conditional write), rescueThread, responseInsert
 src/db/failures.ts        ingest_failure: recordFailure / clearFailure / listFailures (skip after 3)
 src/lib/google-auth.ts    service-account JWT (domain-wide delegation) → Gmail access token
+src/lib/budget.ts         per-invocation subrequest / D1 query budget
 src/lib/thread-state.ts   status / awaiting_since / reopen rules, responseMinutes (pure)
 src/lib/triage.ts         demotion rules (pure)
 src/lib/clock.ts          business-minutes clock (pure)
 src/lib/quo-signature.ts  Quo webhook verification (Standard Webhooks)
 schema.sql                D1 schema + brand seed
 public/index.html         UI, mock data until USE_API = true
-prove/*.mjs               run-by-hand source proofs; need real credentials (Gmail: GOOGLE_SERVICE_ACCOUNT_FILE)
+prove/*.mjs               run-by-hand source proofs; need real credentials (Gmail: GOOGLE_SERVICE_ACCOUNT_FILE).
+                          Never in cron. backfill-known-senders.mjs (one-off) and ingest-live.mjs
+                          write customer data to files outside the repo only.
+seeds/*.example.sql       shape of setup seeds; real seeds live outside the repo
 tests/*.test.mjs          node:test suites; tests/helpers has the D1 shim, fake Gmail, fake
                           Quo v1 API, and an Access JWT minter
 ```

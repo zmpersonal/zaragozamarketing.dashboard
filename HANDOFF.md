@@ -46,13 +46,13 @@ spam judgment as interchangeable with "this is bulk mail" was a design error, no
 
 **The evidence.** Four spam-labelled messages had subjects that read like genuine customer
 inquiries:
-- "Track A Shipment – Priority1 for A Customer" from `verified.customer@example.com`
+- "Track A Shipment – Priority1 for [customer name]" from a personal address
 - "Refund Request – Order #467740987"
 - "Problem With My Recent Order"
 - "Hi please is this Inhousewellness"
 
-The owner checked all four by hand. **One was a real customer** (`verified.customer@example.com`, whose
-message Gmail misfiled) and **three were phishing.**
+The owner checked all four by hand. **One was a real customer** (the shipment message, which
+Gmail misfiled) and **three were phishing.**
 
 **What that proves:**
 - The three fakes were indistinguishable from the real one by subject alone.
@@ -64,7 +64,7 @@ subject readable at a glance, no click to reveal, and the subject never cut belo
 characters. That's why the tier is not optional, and why it must never be folded back into
 bulk or hidden.
 
-The real customer is now exempt (`src/lib/known-customers.ts`), and our own reply history beats
+The real customer is now exempt (a `sender_rule` row seeded from outside the repo), and our own reply history beats
 Gmail's spam judgment in general.
 
 ---
@@ -108,10 +108,17 @@ second agent or brand team is added.
 11. **The board and subtitle counts still include bulk and spam threads.** "N open across all
     brands" and the per-brand cells count every open thread, whatever its tier. Should they
     count Needs reply only?
-12. **The known-customer list is customer personal data in the repo.** `verified.customer@example.com`
-    appears in `src/lib/known-customers.ts` and in tests, as requested. The repo is private,
-    but consider holding verified customers only in D1 (`sender_rule`) once it exists, and
-    using a placeholder address in tests.
+12. **Resolved in round 7:** header and per-brand counts are Needs reply only.
+13. **Resolved in round 7:** verified customers are `sender_rule` rows from a seed kept outside
+    the repo; the address was removed from code, tests and this branch's history.
+14. **A Needs-reply thread marked `answered` without contact stays `waiting`** (round 7). With
+    incremental ingest nothing re-syncs an unchanged thread, so `POST /api/actions` keeps a
+    non-contact `answered` on a thread still awaiting a reply as `waiting` at once.
+15. **Gmail and Quo run on separate cron triggers** (`*/5` and `2-59/5`), each with its own
+    subrequest budget.
+16. **The known-sender backfill includes our own colleagues.** 8 of the 723 addresses are
+    `@inhousewellness.com` (the mailbox itself is excluded). Harmless: they are exempt from
+    demotion, which they would be anyway once replied to. Filter them out?
 
 
 ---
@@ -122,12 +129,12 @@ second agent or brand team is added.
 - **Query:** `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats` with
   `includeSpamTrash=true`, paged.
 - **Customer, 40:** 20 are customer only because we've replied to the sender, and 1 because of
-  the verified-customer list (`verified.customer@example.com`).
+  the verified-customer list (one address, now a `sender_rule` seed outside the repo).
 - **Spam, 186:** 67 also carry bulk signals, and 119 are spam on Gmail's label alone.
 - **It reconciles with round 5,** which had 187 Gmail-spam messages and 58 bulk on our rules
   alone. The verified customer moved from spam to customer (39 kept → 40 customer).
 - Round-4 findings stay withdrawn. The round-5 observations below still stand, except
-  `verified.customer@example.com`, which is resolved.
+  the misfiled verified customer, which is resolved.
 
 Rules were not changed except items 1, 3 and 6 of round 6. These are observations only.
 
@@ -144,9 +151,8 @@ Rules were not changed except items 1, 3 and 6 of round 6. These are observation
   ×3, account notices ×3, and shipping notices ×3.
 - **About 21 of the 40 customer messages are supplier marketing or cold outreach:**
   - Golden Designs ×5, Bathing Brands promotions ×5 (exempt), Wizzisaunas ×2, Dream-Pod
-  - outreach from sender7, sender8, sender1, sender2,
-    sender9, sender10, sender11, sender6
-  - sender4 ×2 (exempt), and Boomerang
+  - cold outreach from 8 individual senders (addresses not recorded here)
+  - a Shopify-app designer ×2 (exempt), and Boomerang
 - **Population:** 284 is below the owner's 300–600 estimate. Not investigated.
 - **Output format:** a subject containing `" | "` makes its line ambiguous. Reason codes are the
   last field.
@@ -195,16 +201,23 @@ Unverified against the real API:
 ### Full-stream Gmail ingest (round 6)
 - **`threads.get` on a spam-filed thread** returns its messages with the SPAM label: verified on
   support@, counts only.
-- **Trash is unverified:** there were no trash messages in the window to test with.
-- **Volume per cron run is a go-live blocker.** Each 5-minute run lists about 280 message IDs
-  (1+ pages) and fetches every distinct thread, a couple of hundred `threads.get` calls. That
-  exceeds a 50-subrequest cap (historically the Free plan) and repeats every 5 minutes. Before
-  deploying, ingest needs to be incremental (Gmail `history.list` from a stored `historyId`, or
-  skip threads unchanged since last sync).
-- **Exemption parity.** The prove script builds "replied to" from 180 days of sent mail. Ingest
-  uses `known_sender` and threads it has seen, so on first deploy a customer we last replied to
-  more than 30 days ago isn't exempt until a new reply. It needs a one-off `known_sender`
-  backfill from sent mail.
+- **Trash is unverified:** Trash on support@ is empty (round 7: `in:trash` and
+  `labelIds=TRASH` both return 0). `prove/ingest-live.mjs` is ready to show a hand-trashed
+  message being picked up.
+- **Volume per cron run (round 7: incremental).** Measured live on support@ with
+  `prove/ingest-live.mjs`: 262 threads in the 30-day window took 11 bounded runs to backfill;
+  the heaviest run used 28 fetches and 87 D1 statements.
+  - Worst case per mailbox per run: fetches ≤ 4 + 25 = 29; D1 ≤ 3 + 25 × (7 + replies in the
+    thread). Plus 1 D1 query for the source list per invocation.
+  - Defaults cap the invocation at 900 subrequests and 900 D1 queries: inside Workers Paid
+    (10,000 / 1,000), not Free (50 / 50, 10 ms cron CPU). **Workers Paid is required.** On Free,
+    `INGEST_MAX_SUBREQUESTS` / `INGEST_MAX_D1_QUERIES` could be set to ~45 but the 10 ms CPU cap
+    would still likely fail.
+  - **Quo ingest is not budgeted yet.** It runs on its own trigger but has no per-run cap.
+- **Exemption parity (round 7).** `prove/backfill-known-senders.mjs` read all 2,192 sent
+  messages on support@ (back to 2024-11-22) and produced 723 `known_sender` rows, in
+  `~/Code/secrets/inhouse-ops-known-senders.sql`. **Not applied to any database:** a human runs
+  `wrangler d1 execute inhouse-ops --file=<that file> --remote` after `schema.sql`.
 - **No-reply separator edge:** names ending in "no" + separator + "reply" (`bruno_reply@`,
   `arno.reply.smith@`) now match `NOREPLY`. None appeared in the real stream.
 
@@ -239,8 +252,14 @@ An unknown `thread_id` returns 500.
 The reopen/unblock action log is written separately from the state change, and the response
 insert from the thread update in ingest.
 
-### 8. Gmail ingest has no pagination
-It reads 50 threads, and only `in:inbox`.
+### 8. The history purge covers only `claude/inh-round-7`
+Round 7 rewrote this branch's history to remove a customer address and customer usernames.
+`claude/inh-round-5` and `claude/inh-round-6` still contain them, and old objects stay in the
+local object store until `git gc --prune=now`. Deleting those branches is the owner's call.
+
+### 9. `prove/ingest-live.mjs` imports the D1 shim from `tests/helpers`
+Deliberate (it runs production SQL on node:sqlite), but it couples a prove script to test
+helpers.
 
 ---
 
@@ -253,9 +272,8 @@ It reads 50 threads, and only `in:inbox`.
 
 ## Scale and cost — verify before go-live
 
-- **Subrequest limit.** Gmail makes 1 token call (cached per isolate), 1 list call and up to 50
-  thread fetches per mailbox. Quo makes 1+ conversation page plus 2 requests per active
-  conversation. Check both against the Workers plan's subrequest limit.
+- **Subrequest limit.** Gmail is budgeted (see "Volume per cron run"). Quo makes 1+
+  conversation page plus 2 requests per active conversation with no cap yet.
 - **D1 reads and writes.** `syncThread` adds one SELECT per thread per sync, plus a
   response/failure write where relevant.
 

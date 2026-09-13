@@ -5,6 +5,65 @@ still unproven.
 
 ---
 
+## Round 7 — privacy, incremental ingest, known senders, counts (2026-09-13, branch `claude/inh-round-7`, cut from `claude/inh-round-6`)
+
+Nothing was deployed, merged, pushed, or PR'd. Every change was done test-first. No database
+was written except local files outside the repo.
+
+### What changed
+1. **Customer addresses out of the repo.**
+   - `src/lib/known-customers.ts` deleted. Verified customers are `sender_rule` rows from a seed
+     kept outside the repo; `seeds/sender_rule.example.sql` shows the shape with fabricated rows.
+   - Tests and the UI mock use fabricated addresses.
+   - `tests/no-personal-addresses.test.mjs` fails on any consumer-mail-domain address under
+     `src/`, `tests/`, `public/` or `prove/`, with a self-test for its detector.
+   - Docs no longer name the customer or list individual outreach senders.
+   - This branch's history was rewritten to remove them (see HANDOFF, Known wrong 8).
+2. **Gmail ingest is incremental** (`history.list` from `source.sync_cursor`), with a bounded
+   backfill on an empty cursor, a bounded window fallback on 404/400, and a per-invocation
+   `Budget` over fetches and D1 statements. Gmail and Quo have separate cron triggers.
+   - Drafts and chats are ignored when working out direction.
+   - A non-contact `answered` on a thread still awaiting a reply stays `waiting`.
+3. **`prove/backfill-known-senders.mjs`**, a one-off (not in cron): every To/Cc/Bcc recipient of
+   all sent mail becomes a `known_sender` row, written as SQL to a file outside the repo.
+4. **Header and per-brand counts are Needs reply only** (`headerCounts`, `brandCell`,
+   `/api/board`).
+5. **`prove/ingest-live.mjs`** runs the real ingest into a local SQLite file outside the repo and
+   reports tiers, trash and newly-trashed threads. The fake Gmail history now honours
+   `historyTypes` and records label removals.
+
+### Failing first, then passing
+- **Personal-address guard:** 1 of 2 failed first (the scan found the address; the detector
+  self-test passed). 9/9 breaks caught once the harness copied `seeds/`.
+- **Header counts:** failed first (no module). 4/4 after; 4/4 breaks caught.
+- **Incremental ingest:** 9/9 failed first. 10/10 after, with a test that the defaults stay
+  under Workers Paid caps.
+  - 12 breaks: 8 caught first time. One miss was an invalid mutant (a syntax error).
+  - Removing either budget check alone is not caught, because the other check still stops the
+    run. Removing both is caught.
+  - Budget-above-cap and one-cron-for-both are caught after the new test and a valid mutant.
+- **Known-sender backfill:** 4 of 6 failed first; the other 2 (prints no addresses, not in
+  cron) passed vacuously with no script. 12/12 breaks caught after the earliest-send test was
+  given a recipient written to twice (it missed at first).
+- **Live ingest check:** failed first (no module). 4/4 after; 9/9 breaks caught, plus 2/2 on the
+  shared outside-repo guard.
+- **Totals:** 186 tests, 186 pass, 0 fail. Check and build are clean, verified after staging.
+
+### Real runs (support@)
+- **Backfill:** 2,192 sent messages scanned back to 2024-11-22 (under the cap), giving
+  723 known senders. The file applies cleanly to `schema.sql` twice.
+- **Live ingest baseline:** 262 threads (45 customer, 39 bulk, 178 spam) in 11 runs; the
+  heaviest run used 28 fetches and 87 D1 statements. 0 failures. Trash in the window: 0.
+- **Trash:** empty on support@. Waiting for the owner to move a junk message to Trash, then
+  `prove/ingest-live.mjs` is re-run against the same state file.
+
+### Still unproven
+- Trash ingest on real mail (pending the owner's hand move).
+- Anything on real Cloudflare: D1, cron triggers, limits.
+- Quo ingest budget.
+
+---
+
 ## Round 6 — spam becomes its own tier; ingest sees the real stream (2026-09-13, branch `claude/inh-round-6`, cut from `claude/inh-round-5`)
 
 Nothing was deployed, merged, pushed, or PR'd. Every change was done test-first.
@@ -16,7 +75,8 @@ Nothing was deployed, merged, pushed, or PR'd. Every change was done test-first.
    - Gmail's SPAM label routes to `spam` only, with weight 0, and adds nothing to the bulk
      score. Spam plus bulk is `spam`.
    - Agent-marked spam is `spam`.
-   - Exemptions beat Gmail spam. `src/lib/known-customers.ts` holds `verified.customer@example.com`.
+   - Exemptions beat Gmail spam. A known-customer list held one verified customer address
+     (removed in round 7: customer addresses never go in the repo).
 3. **`24af341` — Gmail ingest reads the round-5 population,** paged, with `includeSpamTrash`,
    and logs the query.
    - It fetches each distinct thread, classifies it from the first inbound message, and stores

@@ -75,12 +75,17 @@ produces a second measurement.
     filesystem.
   - Reads everything received in the last 30 days, not just the inbox: archived, filtered,
     spam and trash included, excluding only sent, drafts and chats.
-    `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats`, with `includeSpamTrash=true`,
-    paged to the end. The query and counts are logged.
+    `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats`, with `includeSpamTrash=true`.
+  - Incremental: the first run seeds Gmail's `historyId` and backfills the window a page at a
+    time (25 threads per run). Later runs read `history.list` and fetch only threads that
+    changed. If Gmail no longer has that history, it re-lists the window and re-seeds.
+  - Every run stays inside a subrequest budget (fetches + D1 queries) and leaves the rest for
+    the next run. The defaults need **Workers Paid**; see HANDOFF, "Volume per cron run".
   - Classifies each thread as customer, bulk or spam (see "The filter").
   - The customer is the sender of the first inbound message. Our replies are identified by
     Gmail's `SENT` label.
   - One bad thread is logged, recorded in `ingest_failure`, and skipped, and the rest sync.
+- **Cron:** Gmail runs on `*/5 * * * *`, Quo on `2-59/5 * * * *`, so each has its own budget.
 - **Quo** (`src/ingest/quo.ts`, Quo v1 API):
   - Reads every text and call created since a cursor stored per source, so an inbound that was
     answered before the next poll is still seen.
@@ -129,6 +134,20 @@ INSERT INTO source (id, brand_id, channel, provider, address) VALUES
   ('quo:PNxxxxxxxx',                    'inhouse', 'phone', 'quo',   'PNxxxxxxxx');
 ```
 
+3. **Seed verified customers and known senders** from files kept **outside the repo** (they
+   are customer contact data):
+
+```bash
+# sender_rule rows: the shape is in seeds/sender_rule.example.sql
+npx wrangler d1 execute inhouse-ops --file=~/Code/secrets/inhouse-ops-sender-rules.sql --remote
+
+# one-off: everyone we have ever written to becomes a known sender
+GOOGLE_SERVICE_ACCOUNT_FILE=~/Code/secrets/<key>.json \
+  node prove/backfill-known-senders.mjs support@inhousewellness.com \
+  --out ~/Code/secrets/inhouse-ops-known-senders.sql
+npx wrangler d1 execute inhouse-ops --file=~/Code/secrets/inhouse-ops-known-senders.sql --remote
+```
+
 Once a database has real rows, schema changes need `wrangler d1 migrations`, because
 `schema.sql` only creates tables that don't exist yet.
 
@@ -148,7 +167,7 @@ three tiers, and none of them is ever hidden:
 Who always counts as a customer, even when Gmail files the mail as spam:
 - anyone we've replied to
 - a sender an agent marked as real
-- an owner-verified customer (`src/lib/known-customers.ts`)
+- a verified customer: a `sender_rule` row seeded at setup (never an address in the code)
 
 **Rescue** (`POST /api/threads/:id/rescue`) changes only the triage verdict, never the clock.
 Ingest never overrides a human's verdict.
@@ -165,14 +184,20 @@ Don't trust an ingest path until its source has been proved in isolation:
 node prove/gmail.mjs support@inhousewellness.com
 node prove/quo.mjs                                   # or: node prove/quo.mjs PNxxxx --days 14
 node prove/triage.mjs support@inhousewellness.com    # read this one carefully
+node prove/ingest-live.mjs support@inhousewellness.com --state ~/Code/secrets/inhouse-ops-live.sqlite
 ```
+
+- `prove/ingest-live.mjs` runs the real ingest into a local SQLite file outside the repo until
+  caught up, then prints counts. Run it again and it's incremental: it shows what the next
+  cron run picks up, and names threads newly moved to Trash.
 
 - `prove/quo.mjs` uses the same v1 calls and waiting/answered rules as ingest.
 - `prove/triage.mjs` runs the filter over 30 days of real mail and prints every message with
   its verdict and reasons. When you read it:
-  1. Any real customer in DEMOTED is the only failure that costs money. It should be zero.
-  2. Newsletters in KEPT are annoying, not dangerous. That's the side we err toward.
-  3. If a demote reason looks wrong, the rule is wrong, not the email.
+  1. A real customer in SPAM or BULK is the only failure that costs money. Scan SPAM by eye.
+  2. Newsletters in CUSTOMER are annoying, not dangerous. That's the side we err toward.
+  3. If a reason code looks wrong, the rule is wrong, not the email.
+  - `SENDER_RULES_FILE` (optional) points at the sender_rule seed outside the repo.
 
 Credentials come from the shell or `.dev.vars` (gitignored):
 - **Gmail scripts** need `GOOGLE_SERVICE_ACCOUNT_FILE`, the path to the service-account key.
