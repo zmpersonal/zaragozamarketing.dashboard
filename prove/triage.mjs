@@ -82,27 +82,52 @@ async function gm(token, path, params = {}) {
 
 const token = await gmailAccessToken(MAILBOX, fail);
 
+/** Every id for a query, following nextPageToken to the end. */
+async function listAll(params) {
+  const ids = [];
+  let pageToken;
+  do {
+    const page = await gm(token, 'messages', { ...params, maxResults: 500, ...(pageToken ? { pageToken } : {}) });
+    for (const m of page.messages ?? []) ids.push(m.id);
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return ids;
+}
+
+/** Map with at most `limit` requests in flight (Gmail allows ~50 messages.get per second). */
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i]); }
+  }));
+  return out;
+}
+
 // Build the exemption set first: everyone we have ever written to.
 // This is what stops a repeat customer from being demoted because their
 // company signature happens to carry an unsubscribe footer.
-const sentList = await gm(token, 'messages', { q: 'in:sent newer_than:180d', maxResults: 200 });
+// Every page of sent mail: a reply beyond the first page still exempts.
+const sentIds = await listAll({ q: 'in:sent newer_than:180d' });
 const everRepliedTo = new Set();
-for (const m of sentList.messages ?? []) {
-  const full = await gm(token, 'messages/' + m.id, { format: 'metadata', metadataHeaders: 'To' });
+await mapLimit(sentIds, 8, async (id) => {
+  const full = await gm(token, 'messages/' + id, { format: 'metadata', metadataHeaders: 'To' });
   const to = (full.payload?.headers ?? []).find((x) => x.name.toLowerCase() === 'to')?.value ?? '';
   for (const part of to.split(',')) if (part.trim()) everRepliedTo.add(emailOf(part));
-}
-
-const list = await gm(token, 'messages', {
-  q: `in:inbox newer_than:${DAYS}d`, maxResults: 400,
 });
-const ids = list.messages ?? [];
+
+// The population is the whole received stream, not what is left in the inbox:
+// archived, auto-filtered, spam and trash included. Only our own sent mail,
+// drafts and chats are excluded. messages.list drops SPAM/TRASH unless
+// includeSpamTrash=true, so that is sent alongside in:anywhere.
+const QUERY = `in:anywhere newer_than:${DAYS}d -in:sent -in:drafts -in:chats`;
+const ids = await listAll({ q: QUERY, includeSpamTrash: 'true' });
 if (!ids.length) fail('No mail in the last ' + DAYS + ' days. Wrong mailbox?');
 
 const kept = [], demoted = [];
 
-for (const stub of ids) {
-  const full = await gm(token, 'messages/' + stub.id, {
+await mapLimit(ids, 8, async (id) => {
+  const full = await gm(token, 'messages/' + id, {
     format: 'metadata',
     metadataHeaders: [
       'From', 'Subject', 'List-Unsubscribe', 'List-Id', 'Precedence',
@@ -120,29 +145,29 @@ for (const stub of ids) {
   };
   const v = classify(msg, everRepliedTo);
   (v.demote ? demoted : kept).push({ msg, v, at: Number(full.internalDate) });
-}
+});
 
 // --- report ---------------------------------------------------------------
-const pad = (s, n) => String(s).slice(0, n).padEnd(n);
-const line = (r) =>
-  '    ' + pad(new Date(r.at).toISOString().slice(5, 10), 6) +
-  pad(emailOf(r.msg.from), 34) + pad(r.msg.subject, 44);
+// One line per message: date | sender address | subject (50 chars) [| reason codes].
+// Dates are America/Chicago, the support desk's zone.
+const dateOf = (ms) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(new Date(ms));
+const subjectOf = (s) => [...String(s).replace(/\s+/g, ' ')].slice(0, 50).join('');
+const row = (r) => `${dateOf(r.at)} | ${emailOf(r.msg.from)} | ${subjectOf(r.msg.subject)}`;
+const newestFirst = (a, b) => b.at - a.at;
 
-console.log(`\n  ${MAILBOX} — last ${DAYS} days, ${ids.length} messages`);
-console.log(`  ${everRepliedTo.size} exempt senders (we have written to them before)\n`);
-
-console.log(`  KEPT — shown to the agent as needing a reply  (${kept.length})\n`);
-for (const r of kept.sort((a, b) => b.at - a.at)) {
-  console.log(line(r) + (r.v.exempt ? '  [exempt: ' + r.v.exempt + ']' : ''));
-}
-
-console.log(`\n  DEMOTED — shown greyed below the fold  (${demoted.length})\n`);
-for (const r of demoted.sort((a, b) => b.at - a.at)) {
-  console.log(line(r) + '  ' + r.v.signals.map((s) => s.code).join(', '));
-}
+console.log(`TOTAL: ${ids.length} messages, ${kept.length} kept, ${demoted.length} demoted`);
+console.log(`QUERY: ${QUERY}`);
+console.log('');
+console.log('DEMOTED (all of them, one line each):');
+for (const r of demoted.sort(newestFirst)) console.log(`${row(r)} | ${r.v.signals.map((s) => s.code).join(', ')}`);
+console.log('');
+console.log('KEPT (all of them, one line each):');
+for (const r of kept.sort(newestFirst)) console.log(row(r));
+console.log('');
 
 const perDay = (n) => (n / DAYS).toFixed(1);
-console.log(`\n  ${perDay(kept.length)} kept/day, ${perDay(demoted.length)} demoted/day.`);
-console.log('  You said roughly 2 real a day out of 10-20.');
-console.log('  If kept/day is far above 2, the rules are too loose — read the KEPT list.');
-console.log('  If ANY real customer is in DEMOTED, stop and tell me which one.\n');
+console.log('---');
+console.log(`mailbox ${MAILBOX}, last ${DAYS} days; list params: includeSpamTrash=true`);
+console.log(`${everRepliedTo.size} exempt senders from ${sentIds.length} sent messages (in:sent newer_than:180d)`);
+console.log(`${kept.filter((r) => r.v.exempt).length} kept only because we have replied to the sender before`);
+console.log(`${perDay(ids.length)} received/day, ${perDay(kept.length)} kept/day, ${perDay(demoted.length)} demoted/day`);
