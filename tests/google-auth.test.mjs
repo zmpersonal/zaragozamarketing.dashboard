@@ -112,11 +112,18 @@ test('a missing or broken GOOGLE_SERVICE_ACCOUNT_JSON skips Gmail with a clear l
 });
 
 test('secret hygiene: no tracked file holds a private key or service-account JSON; key files are gitignored', () => {
+  // Real key material: a PEM header followed by a base64 body, or service-account JSON.
+  // (Code that builds or strips a PEM header is fine; a key is not.)
+  const KEY_MATERIAL = /-----BEGIN (RSA )?PRIVATE KEY-----\s*[A-Za-z0-9+/]{64}/;
+  const SA_JSON = /"type"\s*:\s*"service_account"/;
+  assert.match(SERVICE_ACCOUNT.private_key, KEY_MATERIAL, 'detector recognises a real PEM key');
+  assert.match(SERVICE_ACCOUNT_JSON, SA_JSON, 'detector recognises service-account JSON');
+
   const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' }).split('\0').filter(Boolean);
   const offenders = tracked.filter((f) => {
     let text;
     try { text = readFileSync(ROOT + f, 'utf8'); } catch { return false; }
-    return /-----BEGIN (RSA )?PRIVATE KEY-----/.test(text) || /"type"\s*:\s*"service_account"/.test(text);
+    return KEY_MATERIAL.test(text) || SA_JSON.test(text);
   });
   assert.deepEqual(offenders, []);
 

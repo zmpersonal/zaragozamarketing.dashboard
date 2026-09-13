@@ -11,8 +11,7 @@
     "db:init": "wrangler d1 execute inhouse-ops --file=./schema.sql --remote",
     "prove:gmail": "node prove/gmail.mjs",
     "prove:quo": "node prove/quo.mjs",
-    "prove:triage": "node prove/triage.mjs",
-    "prove:oauth": "node prove/oauth-bootstrap.mjs"
+    "prove:triage": "node prove/triage.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260911.1",

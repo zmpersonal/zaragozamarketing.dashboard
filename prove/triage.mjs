@@ -16,7 +16,11 @@
  *
  * Run:  node prove/triage.mjs support@inhousewellness.com
  *       node prove/triage.mjs support@inhousewellness.com --days 60
+ *
+ * Auth: a service account with domain-wide delegation (gmail.readonly),
+ * impersonating the mailbox. GOOGLE_SERVICE_ACCOUNT_FILE = path to the key.
  */
+import { gmailAccessToken } from './_google.mjs';
 
 const MAILBOX = process.argv[2];
 const DAYS = Number(process.argv[process.argv.indexOf('--days') + 1]) || 30;
@@ -61,23 +65,6 @@ function classify(msg, everRepliedTo) {
 }
 
 // --- Gmail ---------------------------------------------------------------
-async function accessToken() {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN)
-    fail('Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN');
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
-      refresh_token: GOOGLE_REFRESH_TOKEN, grant_type: 'refresh_token',
-    }),
-  });
-  const j = await res.json();
-  if (!res.ok) fail('Token exchange ' + res.status + ': ' + JSON.stringify(j));
-  return j.access_token;
-}
-
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 async function gm(token, path, params = {}) {
   const url = new URL(GMAIL + path);
@@ -87,7 +74,7 @@ async function gm(token, path, params = {}) {
   return res.json();
 }
 
-const token = await accessToken();
+const token = await gmailAccessToken(MAILBOX, fail);
 
 // Build the exemption set first: everyone we have ever written to.
 // This is what stops a repeat customer from being demoted because their
