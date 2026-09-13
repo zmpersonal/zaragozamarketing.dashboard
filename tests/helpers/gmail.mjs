@@ -49,6 +49,7 @@ export async function withGmail(threads, fn) {
       const id = path.slice('threads/'.length);
       const msgs = threads[id];
       if (!msgs) return new Response('not found', { status: 404 });
+      if (msgs.raw) return ok({ id, ...msgs.raw }); // a thread served exactly as given, e.g. malformed
       return ok({
         id,
         snippet: msgs.at(-1).subject,
