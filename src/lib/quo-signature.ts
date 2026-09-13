@@ -1,22 +1,35 @@
 /**
- * Quo (formerly OpenPhone) webhook signature verification.
+ * Quo webhook signature verification — Standard Webhooks.
  *
- * Per support.quo.com/core-concepts/integrations/webhooks:
- *   header   openphone-signature: <scheme>;<version>;<timestamp>;<signature>
- *            scheme "hmac", version "1", timestamp in unix milliseconds,
- *            signature = base64(HMAC-SHA256(key, timestamp + "." + payload))
- *   key      the webhook's signing secret, base64-decoded to raw bytes
- *   payload  JSON with whitespace removed
- *   replay   reject timestamps outside a tolerance (they suggest 5 minutes)
+ * This follows Quo's current versioned docs (API 2026-03-30,
+ * www.quo.com/docs/2026-03-30/webhooks-overview and webhooks-quickstart),
+ * which specify one scheme, compatible with the Svix SDK:
+ *   webhook-id         delivery id (idempotency key, stable across retries)
+ *   webhook-timestamp  unix SECONDS when Quo signed
+ *   webhook-signature  space-separated "v1,<base64>" entries
+ *   signed content     `${webhook-id}.${webhook-timestamp}.${raw body}`
+ *   key                the "whsec_..." secret, base64-decoded after the prefix
+ *   mac                HMAC-SHA256; reject timestamps > 5 minutes off
+ * (Standard Webhooks spec: github.com/standard-webhooks/standard-webhooks)
  *
- * Quo's Python sample signs the raw request bytes and its Node sample signs
- * JSON.stringify(parsed body). Those agree when the body arrives compact; we
- * accept a match on either, so neither sample's reading can lock us out.
- * Both still require the secret, so accepting two forms admits no forgery.
+ * The legacy `openphone-signature` scheme (support.quo.com) is NOT accepted:
+ * its two published samples disagree on key handling, so a delivery signed
+ * that way fails closed with 401. See HANDOFF.
  */
 
-export const SIGNATURE_HEADER = 'openphone-signature';
-export const TOLERANCE_MS = 5 * 60 * 1000;
+export const TOLERANCE_SECONDS = 5 * 60;
+
+export interface WebhookHeaders {
+  id: string | null;
+  timestamp: string | null;
+  signature: string | null;
+}
+
+export const webhookHeaders = (h: Headers): WebhookHeaders => ({
+  id: h.get('webhook-id'),
+  timestamp: h.get('webhook-timestamp'),
+  signature: h.get('webhook-signature'),
+});
 
 function base64ToBytes(b64: string): Uint8Array | null {
   try {
@@ -26,42 +39,32 @@ function base64ToBytes(b64: string): Uint8Array | null {
   }
 }
 
-export async function verifyQuoSignature(
-  header: string | null,
+export async function verifyQuoWebhook(
+  headers: WebhookHeaders,
   rawBody: string,
-  secretBase64: string,
-  nowMs: number,
+  secret: string,
+  nowSeconds: number,
 ): Promise<boolean> {
-  if (!header || !secretBase64) return false;
+  const { id, timestamp, signature } = headers;
+  if (!id || !timestamp || !signature || !secret) return false;
 
-  const fields = header.split(';');
-  if (fields.length !== 4) return false;
-  const [scheme, version, timestamp, signature] = fields;
-  if (scheme !== 'hmac' || version !== '1' || !/^\d+$/.test(timestamp)) return false;
-  if (Math.abs(nowMs - Number(timestamp)) > TOLERANCE_MS) return false;
+  if (!/^\d+$/.test(timestamp)) return false;
+  if (Math.abs(nowSeconds - Number(timestamp)) > TOLERANCE_SECONDS) return false;
 
-  const mac = base64ToBytes(signature);
-  const keyBytes = base64ToBytes(secretBase64);
-  if (!mac || !mac.length || !keyBytes || !keyBytes.length) return false;
+  const keyBytes = base64ToBytes(secret.startsWith('whsec_') ? secret.slice('whsec_'.length) : secret);
+  if (!keyBytes || !keyBytes.length) return false;
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+  const content = new TextEncoder().encode(`${id}.${timestamp}.${rawBody}`);
 
-  const key = await crypto.subtle.importKey(
-    'raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
-  );
-
-  const candidates = [rawBody];
-  try {
-    const compact = JSON.stringify(JSON.parse(rawBody));
-    if (compact !== rawBody) candidates.push(compact);
-  } catch {
-    // Not JSON: only the raw bytes can match.
-  }
-
-  const encoder = new TextEncoder();
-  for (const payload of candidates) {
+  // Several entries allow key rotation. Only symmetric v1 entries are ours;
+  // anything else (e.g. asymmetric v1a) is ignored, not trusted.
+  for (const entry of signature.split(' ')) {
+    const comma = entry.indexOf(',');
+    if (comma < 0 || entry.slice(0, comma) !== 'v1') continue;
+    const mac = base64ToBytes(entry.slice(comma + 1));
+    if (!mac || !mac.length) continue;
     // subtle.verify compares in constant time.
-    if (await crypto.subtle.verify('HMAC', key, mac, encoder.encode(`${timestamp}.${payload}`))) {
-      return true;
-    }
+    if (await crypto.subtle.verify('HMAC', key, mac, content)) return true;
   }
   return false;
 }
