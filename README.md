@@ -73,7 +73,11 @@ produces a second measurement.
     There are no refresh tokens.
   - The Worker reads the key JSON from the `GOOGLE_SERVICE_ACCOUNT_JSON` secret; Workers have no
     filesystem.
-  - Reads the last 30 days of inbox threads per mailbox.
+  - Reads everything received in the last 30 days, not just the inbox: archived, filtered,
+    spam and trash included, excluding only sent, drafts and chats.
+    `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats`, with `includeSpamTrash=true`,
+    paged to the end. The query and counts are logged.
+  - Classifies each thread as customer, bulk or spam (see "The filter").
   - The customer is the sender of the first inbound message. Our replies are identified by
     Gmail's `SENT` label.
   - One bad thread is logged, recorded in `ingest_failure`, and skipped, and the rest sync.
@@ -130,23 +134,28 @@ Once a database has real rows, schema changes need `wrangler d1 migrations`, bec
 
 ## The filter
 
-support@ takes 10–20 messages a day and roughly 2 are real. The rules that sort them are in
-`src/lib/triage.ts`. They're structural facts about each message: List-Unsubscribe, Gmail's
-Promotions/Social categories, Precedence: bulk, no-reply senders. There's no model in this
-path.
+The rules are in `src/lib/triage.ts`. There's no model in this path. Every thread lands in one of
+three tiers, and none of them is ever hidden:
+- **Needs reply** (`customer`).
+- **Probably not customers** (`bulk`). Triggered by structural bulk-mail signals:
+  List-Unsubscribe, Gmail's Promotions/Social categories, Precedence: bulk, no-reply senders.
+  The reasons are shown on each row.
+- **Spam.** Anything carrying Gmail's spam label. It sits at the bottom with a count, always
+  expanded, with the sender and the full subject on every line. Gmail is wrong about some real
+  customers, and a terse real customer can't be told from phishing by rule, so a human scans
+  it.
 
-Two rules matter more than the list:
-- **Nothing is hidden.** A demoted message is only moved below the fold, with its reasons shown.
-- **Anyone we've replied to is exempt**, so a repeat customer whose signature carries an
-  unsubscribe footer never falls off the list.
+Who always counts as a customer, even when Gmail files the mail as spam:
+- anyone we've replied to
+- a sender an agent marked as real
+- an owner-verified customer (`src/lib/known-customers.ts`)
 
-**Not wired in yet:**
-- Ingest doesn't call the filter.
-- The UI has no demoted section or rescue button.
-- The "mark as not a customer or spam" sender rules aren't written anywhere.
+**Rescue** (`POST /api/threads/:id/rescue`) changes only the triage verdict, never the clock.
+Ingest never overrides a human's verdict.
 
-What exists today is the tested rules and `POST /api/threads/:id/rescue`, which changes only the
-triage verdict and never the clock.
+**Not built yet:**
+- a rescue or "not spam" button in the UI
+- writing sender rules from the UI
 
 ## Prove the sources first
 

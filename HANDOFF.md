@@ -3,7 +3,7 @@
 This file holds open questions and known-wrong things carried forward. Remove an item only once
 it's fixed and proven, or once the owner decides it.
 
-Last updated: round 5, 2026-09-13.
+Last updated: round 6, 2026-09-13.
 
 ---
 
@@ -39,6 +39,36 @@ against the real API, cheaply and printing no content, as soon as credentials ex
 
 ---
 
+## Why the spam tier exists (owner decision, round 6)
+
+Round 5 showed Gmail's `SPAM` label driving 126 of 245 demotions on its own. Treating Gmail's
+spam judgment as interchangeable with "this is bulk mail" was a design error, now corrected.
+
+**The evidence.** Four spam-labelled messages had subjects that read like genuine customer
+inquiries:
+- "Track A Shipment – Priority1 for A Customer" from `verified.customer@example.com`
+- "Refund Request – Order #467740987"
+- "Problem With My Recent Order"
+- "Hi please is this Inhousewellness"
+
+The owner checked all four by hand. **One was a real customer** (`verified.customer@example.com`, whose
+message Gmail misfiled) and **three were phishing.**
+
+**What that proves:**
+- The three fakes were indistinguishable from the real one by subject alone.
+- The only tell was that they named no order number and no specific product.
+- **No rule can separate those from a terse real customer**, who might also name neither.
+
+**What follows:** the spam section must stay visible and scannable by a human, with sender and
+subject readable at a glance, no click to reveal, and the subject never cut below 50
+characters. That's why the tier is not optional, and why it must never be folded back into
+bulk or hidden.
+
+The real customer is now exempt (`src/lib/known-customers.ts`), and our own reply history beats
+Gmail's spam judgment in general.
+
+---
+
 ## Accepted gaps (owner decision)
 
 ### No per-thread authorization (round 2)
@@ -66,94 +96,64 @@ second agent or brand team is added.
 7. **A service-account key with no matching mailbox delegation fails per mailbox.** The token
    exchange returns `unauthorized_client`, which is logged and skips that mailbox. Other
    mailboxes still sync.
+8. **Items 1 and 8 conflicted, and I resolved it this way (round 6).** Item 1 said "spam
+   collapsed at the bottom with a count"; item 8 said "no click to see the list". Spam renders
+   as a compact section at the bottom with a count, always expanded, one plain line per
+   message.
+9. **Agent-marked spam senders (`sender_rule` verdict `spam`) are tier `spam`,** not `bulk`.
+10. **Thread triage comes from the thread's first inbound message.**
+    - A later message in the same thread doesn't re-tier it, even if Gmail labels it
+      differently.
+    - Replying in a thread exempts its sender, and that's recorded in `known_sender`.
+11. **The board and subtitle counts still include bulk and spam threads.** "N open across all
+    brands" and the per-brand cells count every open thread, whatever its tier. Should they
+    count Needs reply only?
+12. **The known-customer list is customer personal data in the repo.** `verified.customer@example.com`
+    appears in `src/lib/known-customers.ts` and in tests, as requested. The repo is private,
+    but consider holding verified customers only in D1 (`sender_rule`) once it exists, and
+    using a placeholder address in tests.
+
 
 ---
 
-## Real-data findings: `prove/triage.mjs` on support@, 30 days (round 5, full stream)
+## Real-data findings: `prove/triage.mjs` on support@, 30 days (round 6, three tiers)
 
-The round-4 run sampled `in:inbox`, which is the residue, not the stream: 46 messages, biased
-toward ambiguous mail. **Every round-4 triage conclusion is withdrawn.** Round 5 sampled the
-whole received stream.
+**Result:** `TOTAL: 284 messages, 40 customer, 58 bulk, 186 spam`.
 - **Query:** `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats` with
-  `includeSpamTrash=true`, paged to the end.
-- **Result:** 284 messages (9.5/day): 39 kept (1.3/day) and 245 demoted (8.2/day).
-- **Exemptions:** 47 exempt senders, built from 147 sent messages over 180 days. 20 of the kept
-  messages were kept only because of an exemption.
+  `includeSpamTrash=true`, paged.
+- **Customer, 40:** 20 are customer only because we've replied to the sender, and 1 because of
+  the verified-customer list (`verified.customer@example.com`).
+- **Spam, 186:** 67 also carry bulk signals, and 119 are spam on Gmail's label alone.
+- **It reconciles with round 5,** which had 187 Gmail-spam messages and 58 bulk on our rules
+  alone. The verified customer moved from spam to customer (39 kept → 40 customer).
+- Round-4 findings stay withdrawn. The round-5 observations below still stand, except
+  `verified.customer@example.com`, which is resolved.
 
-Rules were **not** changed, apart from the owner-requested no-reply fix. These are
-observations only.
+Rules were not changed except items 1, 3 and 6 of round 6. These are observations only.
 
-### Population
-- **284 is below the owner's 300–600 estimate.**
-- Possible causes: mail routed to other mailboxes or a Google Group instead of support@, trash
-  emptied inside the window, or the estimate itself. Not investigated.
-
-### What drives demotion
-- 187 of 245 demoted messages carry Gmail's own `SPAM` label, and 126 are demoted on that alone.
-- 58 were demoted by our rules without Gmail spam.
-- 45 carry `noreply`. 21 of those are caught only by the widened pattern: Apps Script failure
-  notices ×18, plus `workspace-noreply`, `payments-noreply` and `googlebase-noreply`.
-- No address containing "bounce", "postmaster" or "mailer-daemon" was matched, so the broader
-  match produced no false positives in this sample.
-
-### Demoted verdicts that may be wrong (observations only)
-- **`verified.customer@example.com` "Track A Shipment – Priority1 for A Customer"** is demoted on
-  `gmail_spam` only.
-  - `customer.alt@example.com` (same local part) is an exempt customer in KEPT.
-  - It could be a real customer writing from a second address, or an impersonation.
-  - The exemption matches exact addresses only.
-- **Customer-shaped subjects demoted on Gmail spam alone:**
-  - `admin@refund-desk.example` "Refund Request – Order #467740987". The order format
-    differs from InHouse's `#INH…`.
-  - `admin@alkling.com` "Problem With My Recent Order" (also `list_unsubscribe` and
-    `precedence`).
-  - `sender3@example.com` "Hi please is this Inhousewellness".
-  - All three look like scams or outreach, but the subjects are what a customer would write.
-- **Account and operations mail for a human, not a customer:**
-  - `no-reply@accounts.google.com` "Critical security alert" ×2.
-  - `workspace-noreply@google.com` "Possible unresolved security risks".
-  - `payments-noreply@google.com` Workspace invoice.
-  - `googlebase-noreply@google.com` "New product image requirements" (Merchant Center).
-  - `omri@bbdetector.com` "Responsible Disclosure of a Subdomain Takeover issue" (Gmail spam;
-    possibly a real security report).
-- **Supplier finance and logistics are demoted:**
-  - `no-reply@bathingbrands.com` "ACH Payment Returned", invoices ×3 and account notices ×3.
-  - `customerservice@bathingbrands.com` shipping notices ×3. These may be needed to answer
-    "where is my order".
-- **`testflight_no_reply@email.apple.com` is not matched by `NOREPLY`** (underscore variant).
-  It's demoted only because Gmail marked it spam.
-
-### Kept verdicts that may be wrong (observations only)
-- **Supplier marketing:** `daniel@goldendesignsinc.com` inventory mailings ×5,
-  `service@wizzisaunas.com` ×2, `ziv@dream-pod.com` MAP pricing, and `tadams@bathingbrands.com`
-  promotions ×5 (exempt, because we replied once).
-- **Cold outreach and newsletters:** `sender7@henrytobin.com`,
-  `kristen@sender8.co`, `sender1@example.com`, `sender2@example.com`,
-  `sarah@sender9.com`, `hector@sender10.com`, `m.johnson@sender11.org`,
-  `sender6@example.com`, and `sender4@example.com` ×2 (exempt).
-- **A service notice:** `boomerang@baydin.com` "Message Credits Will Be Refilled".
-- **Probably correct:**
-  - Apparent customers: `ackerp81` ×4, `gcolon71` ×2, `karellbelle1`, `amachleit`,
-    `customer.alt@example.com`.
-  - `mailer@shopify.com`, a Shopify-relayed customer message.
-  - Possible trade partner: `sofia@saunamo.pt`.
-
-### Output format
-Two subjects contain `" | "` ("Guest Post Placements — DR 60–82 | Dofollow…", "Trustpilot ★5 |
-Google ★5 | …"). A line with more than four fields is ambiguous to parse. Reason codes are
-always the last field.
+### Still open from rounds 5 and 6
+- **Probable phishing in spam:** "Refund Request – Order #467740987", "Problem With My Recent
+  Order" and "Hi please is this Inhousewellness" are all correctly `spam`. The owner verified
+  them as phishing.
+- **Account and operations mail for a human is `bulk`:**
+  - Google "Critical security alert" ×2
+  - Workspace "Possible unresolved security risks" and its invoice
+  - Merchant Center "New product image requirements"
+  - "Responsible Disclosure of a Subdomain Takeover" is `spam`
+- **Supplier finance and logistics are `bulk`:** Bathing Brands "ACH Payment Returned", invoices
+  ×3, account notices ×3, and shipping notices ×3.
+- **About 21 of the 40 customer messages are supplier marketing or cold outreach:**
+  - Golden Designs ×5, Bathing Brands promotions ×5 (exempt), Wizzisaunas ×2, Dream-Pod
+  - outreach from sender7, sender8, sender1, sender2,
+    sender9, sender10, sender11, sender6
+  - sender4 ×2 (exempt), and Boomerang
+- **Population:** 284 is below the owner's 300–600 estimate. Not investigated.
+- **Output format:** a subject containing `" | "` makes its line ambiguous. Reason codes are the
+  last field.
 
 ---
 
-## Gmail ingest reads only `in:inbox` (same bias as the prove script)
 
-`src/ingest/gmail.ts` lists `in:inbox -in:chats newer_than:30d`. Two consequences:
-- Customer mail that a Gmail filter archives or labels away never reaches the console queue.
-- Nor does mail Gmail files as spam, such as the possible customer `verified.customer@example.com` above.
-
-Not changed this round. It needs an owner decision on which population the queue should read.
-
----
 
 ## Unproven — needs a real system
 
@@ -192,6 +192,22 @@ Unverified against the real API:
 - **Group conversations have no call history.**
 - **The dated API doesn't list messages yet.**
 
+### Full-stream Gmail ingest (round 6)
+- **`threads.get` on a spam-filed thread** returns its messages with the SPAM label: verified on
+  support@, counts only.
+- **Trash is unverified:** there were no trash messages in the window to test with.
+- **Volume per cron run is a go-live blocker.** Each 5-minute run lists about 280 message IDs
+  (1+ pages) and fetches every distinct thread, a couple of hundred `threads.get` calls. That
+  exceeds a 50-subrequest cap (historically the Free plan) and repeats every 5 minutes. Before
+  deploying, ingest needs to be incremental (Gmail `history.list` from a stored `historyId`, or
+  skip threads unchanged since last sync).
+- **Exemption parity.** The prove script builds "replied to" from 180 days of sent mail. Ingest
+  uses `known_sender` and threads it has seen, so on first deploy a customer we last replied to
+  more than 30 days ago isn't exempt until a new reply. It needs a one-off `known_sender`
+  backfill from sent mail.
+- **No-reply separator edge:** names ending in "no" + separator + "reply" (`bruno_reply@`,
+  `arno.reply.smith@`) now match `NOREPLY`. None appeared in the real stream.
+
 ### Other
 - **D1 itself.** All SQL has run only on `node:sqlite`.
 - **`wrangler dev`.**
@@ -207,10 +223,9 @@ Unverified against the real API:
 This includes "blocked 6d", and breaks invariant 6 for response ages. The UI also doesn't show
 `ingest_failures`, which only `GET /api/board` returns.
 
-### 3. Triage isn't wired in
-- Nothing calls `classify()`.
-- The UI has no demoted section and no rescue button.
-- Sender rules aren't written.
+### 3. Triage is wired in, but the UI can't correct it yet
+Ingest classifies every Gmail thread (round 6), but there's no rescue or "not spam" button in
+the UI, and no sender-rule writes. Quo and chat threads are always `customer`.
 
 ### 4. The Shopify relay hides the customer
 `mailer@shopify.com` would be stored as the customer handle (see real-data findings).

@@ -105,34 +105,48 @@ never from `conversation_started_at`. The rules live once, in `src/lib/thread-st
 - `responseMinutes(thread, now)` returns null when caught up. It never falls back to
   `conversation_started_at`.
 
-### 5. Triage never deletes or hides mail
-It only demotes, and every demotion carries its reason codes through to the UI.
-- **Enforced today:** `classify()` in `src/lib/triage.ts` is pure. It returns
-  `{ demote, score, signals[{code, why, weight}], exemptReason? }` and has no side effects.
-  - A score of 2 or more demotes.
-  - Senders in `markedSpam` are always demoted. Senders in `markedReal` and `everRepliedTo` are
-    never demoted.
+### 5. Triage never deletes or hides mail, in any of its three tiers
+Every thread is `customer` (needs a reply), `bulk` (probably not a customer) or `spam`. Every
+tier is shown, and every non-customer verdict carries its reasons to the UI.
+- **Spam is its own tier, never a heavier bulk signal.**
+  - Gmail's `SPAM` label routes to `spam` and only there. Its signal has weight 0, and the bulk
+    score counts bulk signals only.
+  - A message with both spam and bulk signals is `spam`, with all its reasons kept.
+  - Agent-marked spam senders are `spam`.
+  - The reason is in HANDOFF, "Why the spam tier exists". Don't fold spam back into bulk.
+- **Exemptions beat every signal, including Gmail spam.** In order:
+  1. owner-verified customers (`src/lib/known-customers.ts`)
+  2. agent-marked real senders (`sender_rule` verdict `customer`)
+  3. senders we've replied to (`known_sender`, and threads with an outbound message)
+  - Tests: `tests/triage-tiers.test.mjs`, including the real `verified.customer@example.com` case.
+- **`classify()` in `src/lib/triage.ts` is pure.** It returns
+  `{ tier, demote, score, signals[{code, why, weight}], exemptReason? }`.
+  - A bulk score of 2 or more is `bulk`.
   - Gmail's `CATEGORY_UPDATES` deliberately contributes no signal.
-  - The no-reply signal (`NOREPLY`) matches its pattern **anywhere in the local part**, never
-    the domain. `no-reply-calendar@` and `notifications-noreply@` both match.
-    `tests/triage.test.mjs` also pins non-matches for names containing "rep" or "reply".
-- **Rules change only after the owner reads real output from the full received stream.**
-  - `prove/triage.mjs` samples
-    `in:anywhere newer_than:<days>d -in:sent -in:drafts -in:chats`, with
-    `includeSpamTrash=true`.
-  - Every list is paged to the end, including the sent mail that builds the exemption set.
-  - Never tune a rule against an `in:inbox` sample: that's the residue, not the stream.
-- **Gap:** nothing calls `classify()` yet.
-  - `thread.triage_score`, `triage_signals`, `sender_rule` and `known_sender` are never written.
-    Only `rescueThread` writes `triage` and `triage_by`.
-  - The UI has no demoted section.
-  - When this is wired: every thread must still come back from `/api/queue`, demoted ones
-    included, with `triage_signals` carried to the UI. No query may filter demoted rows out.
-    Ingest must not overwrite a triage verdict a human set (`triage_by` not null). Today
-    `syncThread` never writes `triage*`.
-- `prove/triage.mjs` holds a hand-copied duplicate of the rules. It has already drifted (no
-  `markedSpam` or `markedReal`). `src/lib/triage.ts` is the source of truth. A parity test keeps
-  the `NOREPLY` pattern identical in both.
+  - `NOREPLY` matches anywhere in the local part, never the domain. The words may be joined by
+    a hyphen, underscore, dot, or nothing (`testflight_no_reply@`, `no.reply@`,
+    `do_not_reply@`). Real-name non-matches are pinned in `tests/triage.test.mjs`.
+- **Gmail ingest classifies every thread** from its first inbound message.
+  - It stores `triage`, `triage_score` and `triage_signals` (JSON `[{code, why}]`).
+  - It never overwrites a verdict a human set: `triage_by` not null, for example after a rescue.
+  - Tests: `tests/gmail-population.test.mjs`.
+- **Gmail ingest reads the whole received stream**, the same population as the prove script:
+  - query `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats`, with
+    `includeSpamTrash=true`
+  - paged to the end, with the query and counts logged
+  - Archived, filtered, spam and trash mail all reach the queue. Never go back to `in:inbox`,
+    which makes the filter moot.
+- **The UI has three sections** (`public/queue-sections.mjs`): Needs reply, Probably not
+  customers (with reason chips), and Spam at the bottom with a count.
+  - Unknown tiers show as Needs reply.
+  - The spam section is always expanded, never behind a click. Each row shows the sender
+    address and the full subject, never truncated.
+  - Tests: `tests/queue-sections.test.mjs`.
+- **Rules change only after the owner reads real output from the full received stream**
+  (`prove/triage.mjs`, same query, every list paged).
+- `prove/_triage-rules.mjs` is a plain-JS copy of the rules for the prove script. A parity test
+  runs both over 343 message shapes and requires identical tier, score and reason codes.
+  `src/lib/triage.ts` is the source of truth.
 
 ### 6. Response time is business minutes only
 Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.

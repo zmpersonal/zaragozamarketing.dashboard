@@ -5,6 +5,60 @@ still unproven.
 
 ---
 
+## Round 6 — spam becomes its own tier; ingest sees the real stream (2026-09-13, branch `claude/inh-round-6`, cut from `claude/inh-round-5`)
+
+Nothing was deployed, merged, pushed, or PR'd. Every change was done test-first.
+
+### What changed
+1. **`d8e0ef7` — `NOREPLY`** allows a hyphen, underscore, dot, or nothing between words
+   (`testflight_no_reply@`). No other rule changed.
+2. **`e275f76` — `classify()` returns a tier:** `customer` / `bulk` / `spam`.
+   - Gmail's SPAM label routes to `spam` only, with weight 0, and adds nothing to the bulk
+     score. Spam plus bulk is `spam`.
+   - Agent-marked spam is `spam`.
+   - Exemptions beat Gmail spam. `src/lib/known-customers.ts` holds `verified.customer@example.com`.
+3. **`24af341` — Gmail ingest reads the round-5 population,** paged, with `includeSpamTrash`,
+   and logs the query.
+   - It fetches each distinct thread, classifies it from the first inbound message, and stores
+     the tier and reasons, never over a human verdict.
+   - Exemptions come from `sender_rule`, the known-customer list, `known_sender` and
+     replied-to threads. Replying records the sender in `known_sender`.
+4. **`70d5e28` — UI** (`public/queue-sections.mjs`): Needs reply, Probably not customers (reason
+   chips), and Spam at the bottom with a count, always expanded, with full sender and subject.
+   `/api/queue` returns the triage fields.
+5. **`a740bce` — `prove/triage.mjs`:** three tiers and the known-customer list, via
+   `prove/_triage-rules.mjs` with a 343-shape parity test. Prints SPAM / BULK / CUSTOMER.
+6. **Docs:** CLAUDE.md invariant 5, README, HANDOFF ("Why the spam tier exists", and decisions
+   8–12), and this entry.
+
+### Failing first, then passing
+- **No-reply separators:** 5 new shapes failed. After: 20/20 triage tests, with a real-name
+  guard (`noah.replyman@`) added after an over-broad break was missed. 5 breaks caught.
+- **Tiers:** 10 tests, all failing first. There was no `tier`, SPAM added 2 to the bulk score,
+  and the list was empty. After: 10/10. 8 breaks caught.
+- **Ingest population:** 7 tests, 6 failing first. Archived and spam mail wasn't ingested, and
+  there was no log, no tiers and no exemptions; the sent-only guard passed vacuously. After:
+  7/7. 10 breaks caught.
+- **UI sections:** 8 tests. The module was missing, and the queue API returned no triage
+  fields. After: 8/8. 9 breaks run, 8 caught; the 9th keeps the tested header, so it violates
+  nothing. Checked in the browser over HTTP with no console errors.
+- **Prove script:** CLI and parity failed first; the old script printed
+  `3 kept, 5 demoted` and demoted the verified customer. After: passing. 7 breaks caught.
+- **Totals:** 160 tests, 160 pass, 0 fail. Check and build are clean, verified after staging.
+  39 breaks caught out of 40 run.
+
+### Real run (support@, 30 days)
+- `TOTAL: 284 messages, 40 customer, 58 bulk, 186 spam`. It reconciles with round 5.
+- The output was scanned for key material: none.
+
+### Still unproven
+- Trash threads in ingest.
+- Ingest volume on Workers (a go-live blocker).
+- `known_sender` backfill.
+- Everything from round 5.
+
+---
+
 ## Round 5 — prove the filter against the real stream (2026-09-13, branch `claude/inh-round-5`, cut from `claude/inh-round-4`)
 
 Nothing was deployed, merged, pushed, or PR'd. Both changes were done test-first.
