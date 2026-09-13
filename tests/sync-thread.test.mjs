@@ -25,7 +25,8 @@ test('an agent blocking the thread mid-sync is not overwritten', async () => {
     ...env.DB,
     prepare(sql) {
       const stmt = env.DB.prepare(sql);
-      if (!sql.includes('SELECT status, last_inbound_at, awaiting_since')) return stmt;
+      // Intercept syncThread's read of the current row (matched loosely so adding columns doesn't silently disable the race).
+      if (!/^\s*SELECT status,/.test(sql)) return stmt;
       return {
         bind: (...p) => ({
           first: async () => {

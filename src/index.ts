@@ -34,6 +34,9 @@ const json = (data: unknown, status = 200) =>
 
 const now = () => Math.floor(Date.now() / 1000);
 
+/** Action kinds that reach the customer. Logging one counts as a reply. */
+const CONTACT_KINDS = new Set(['replied', 'called']);
+
 /**
  * Identity comes from the Cloudflare Access JWT, which Access has already
  * validated at the edge before the request reaches us. We verify the
@@ -206,21 +209,33 @@ export default {
         ).bind(b.thread_id, user.email, b.kind, b.body ?? null, now()),
       ];
 
-      // Logging a reply is what moves a thread out of the waiting count.
-      if (b.status) {
+      // Contact with the customer ('replied', 'called') is a reply wherever it
+      // happened: it stamps last_outbound_at and stops the clock, and ingest
+      // treats that stamp as an outbound message (lib/thread-state.ts), so the
+      // next sync cannot flip the thread back to waiting. Other kinds (notes,
+      // escalations) change status only if one was chosen, and never
+      // last_outbound_at.
+      const contact = CONTACT_KINDS.has(b.kind);
+      if (b.status || contact) {
         batch.push(
           env.DB.prepare(
             `UPDATE thread
-             SET status = ?2, blocked_on = ?3, blocked_note = ?4,
+             SET status = CASE
+                   WHEN ?2 IS NULL THEN CASE WHEN ?7 AND status = 'waiting' THEN 'answered' ELSE status END
+                   WHEN ?7 AND ?2 = 'waiting' THEN 'answered'
+                   ELSE ?2
+                 END,
+                 blocked_on   = CASE WHEN ?2 IS NULL THEN blocked_on ELSE ?3 END,
+                 blocked_note = CASE WHEN ?2 IS NULL THEN blocked_note ELSE ?4 END,
                  assignee = COALESCE(assignee, ?5),
-                 last_outbound_at = ?6,
-                 closed_at = CASE WHEN ?2 = 'closed' THEN ?6 ELSE NULL END,
-                 -- closing means caught up; a later inbound reopens it (db/threads.ts)
-                 awaiting_since = CASE WHEN ?2 = 'closed' THEN NULL ELSE awaiting_since END
+                 last_outbound_at = CASE WHEN ?7 THEN ?6 ELSE last_outbound_at END,
+                 closed_at = CASE WHEN ?2 IS NULL THEN closed_at WHEN ?2 = 'closed' THEN ?6 ELSE NULL END,
+                 -- contact or closing means caught up; a later inbound starts the clock again
+                 awaiting_since = CASE WHEN ?7 OR ?2 = 'closed' THEN NULL ELSE awaiting_since END
              WHERE id = ?1`
           ).bind(
-            b.thread_id, b.status, b.blocked_on ?? null, b.blocked_note ?? null,
-            user.email, now()
+            b.thread_id, b.status ?? null, b.blocked_on ?? null, b.blocked_note ?? null,
+            user.email, now(), contact ? 1 : 0
           )
         );
       }

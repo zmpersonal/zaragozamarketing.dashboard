@@ -21,6 +21,8 @@ export interface Observed {
 export interface Existing {
   status: string;
   last_inbound_at: number;
+  /** Includes contact an agent logged (a call, a reply sent outside the mailbox). */
+  last_outbound_at: number | null;
   awaiting_since: number | null;
 }
 
@@ -55,12 +57,22 @@ export function oldestUnanswered(timeline: Observed[]): number | null {
  * - blocked: a human set it, so it stays blocked, but the clock still runs.
  * - otherwise: waiting if anything is unanswered, else answered.
  *
+ * The stored last_outbound_at is treated as one more outbound event, so
+ * contact an agent logged in the console (a phone call on an email thread)
+ * counts as a reply even though the provider never saw it. Ingest can
+ * therefore never resurrect 'waiting' while last_outbound_at is newer than
+ * the newest inbound message.
+ *
  * Once a thread is awaiting, awaiting_since holds until we are seen to reply.
  * That keeps a reopened thread from sliding back to a pre-close message on
  * the next sync, and lets partial sources like Quo (which only report the
  * latest activity) keep the start of a run of unanswered texts.
  */
-export function resolveState(existing: Existing | null, timeline: Observed[]): ResolvedState {
+export function resolveState(existing: Existing | null, observed: Observed[]): ResolvedState {
+  const timeline = existing?.last_outbound_at != null
+    ? [...observed, { at: existing.last_outbound_at, inbound: false }]
+    : observed;
+
   if (existing?.status === 'closed') {
     const fresh = chronological(timeline).filter((m) => m.at > existing.last_inbound_at);
     if (!fresh.some((m) => m.inbound)) {

@@ -3,8 +3,8 @@
  *
  * syncThread reads the stored row, resolves the new state with the pure
  * rules in lib/thread-state.ts, then writes it back conditionally: the
- * UPDATE only applies if status, awaiting_since and last_inbound_at are
- * still what we read. If an agent changed the thread in between, the
+ * UPDATE only applies if status, awaiting_since, last_inbound_at and
+ * last_outbound_at are still what we read. If an agent changed the thread in between, the
  * write is skipped and the next cron run resolves again from fresh data,
  * so ingest can never clobber a status a human just set.
  */
@@ -33,7 +33,7 @@ export type SyncResult = 'inserted' | 'updated' | 'reopened' | 'skipped';
 
 export async function syncThread(db: D1Database, o: ThreadObservation, now: number): Promise<SyncResult> {
   const existing = await db
-    .prepare('SELECT status, last_inbound_at, awaiting_since FROM thread WHERE id = ?1')
+    .prepare('SELECT status, last_inbound_at, last_outbound_at, awaiting_since FROM thread WHERE id = ?1')
     .bind(o.id)
     .first<Existing>();
   const state = resolveState(existing, o.timeline);
@@ -73,11 +73,12 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
       AND status = ?11
       AND awaiting_since IS ?12
       AND last_inbound_at = ?13
+      AND last_outbound_at IS ?14
   `).bind(
     o.id, o.refresh_customer ? 1 : 0, o.customer_name, o.customer_handle, o.preview,
     o.is_automated ?? null, o.newest_inbound_at, o.newest_outbound_at,
     state.status, state.awaiting_since,
-    existing.status, existing.awaiting_since, existing.last_inbound_at,
+    existing.status, existing.awaiting_since, existing.last_inbound_at, existing.last_outbound_at,
   ).run();
 
   if (res.meta.changes === 0) return 'skipped';
