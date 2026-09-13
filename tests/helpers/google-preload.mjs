@@ -30,6 +30,13 @@ const mail = {
   's1': { labelIds: ['SENT'], at: now - 10 * day, headers: [h('To', 'Someone <someone@example.com>')] },
   's2': { labelIds: ['SENT'], at: now - 11 * day, headers: [h('To', 'Other <other@example.com>')] },
   's3': { labelIds: ['SENT'], at: now - 90 * day, headers: [h('To', 'Priya Raman <priya@acme.example>')] },
+  // Years back: a quoted display name with a comma, Cc and Bcc, our own mailbox
+  // copied in, and mixed case. Only the sent-mail backfill reaches this far.
+  's-old': { labelIds: ['SENT'], at: now - 1000 * day, headers: [
+    h('To', '"Ortiz, Sam" <Sam@Example.com>, plain@old.example'),
+    h('Cc', 'InHouse Support <support@inhousewellness.com>, "O\'Brien" <o\'brien@old.example>'),
+    h('Bcc', 'hidden@old.example, Dana Reyes <dana@example.com>'),
+  ] },
 };
 const threads = { t1: { id: 't1', messages: [{ id: 'm-inbox', internalDate: String(now - day), labelIds: ['INBOX'], payload: { headers: mail['m-inbox'].headers } }] } };
 
