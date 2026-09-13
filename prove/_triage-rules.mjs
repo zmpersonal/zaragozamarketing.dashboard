@@ -4,17 +4,21 @@
  * src/lib/triage.ts is the source of truth. This copy exists only until the
  * owner approves importing it directly. tests/triage.test.mjs runs both over
  * a matrix of messages and requires identical tier, score and reason codes.
- * Agent sender rules (markedReal / markedSpam) live in D1 and don't apply here.
+ * Sender rules (markedReal = verified customers, markedSpam) come from a seed
+ * file kept outside the repo (see prove/triage.mjs, SENDER_RULES_FILE).
  */
 export const NOREPLY = /(no[-_.]?reply|do[-_.]?not[-_.]?reply|bounce|mailer[-_.]?daemon|postmaster)/i;
 export const emailOf = (from) => (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
 
-/** ex: { everRepliedTo: Set, knownCustomers: Set } */
+/** ex: { everRepliedTo: Set, markedReal?: Set, markedSpam?: Set } */
 export function classify(msg, ex) {
   const addr = emailOf(msg.from);
   const customer = (exempt) => ({ tier: 'customer', demote: false, score: 0, signals: [], exempt });
   // Exemptions beat every signal, including Gmail spam.
-  if (ex.knownCustomers?.has(addr)) return customer('owner verified this sender as a customer');
+  if (ex.markedSpam?.has(addr)) {
+    return { tier: 'spam', demote: true, score: 0, signals: [{ code: 'marked_spam', why: 'agent marked this sender as spam', weight: 0 }] };
+  }
+  if (ex.markedReal?.has(addr)) return customer('verified customer (sender rule)');
   if (ex.everRepliedTo.has(addr)) return customer('we have replied to this sender before');
 
   const signals = [];

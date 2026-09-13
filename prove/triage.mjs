@@ -34,7 +34,7 @@ function fail(msg) {
 
 // --- the triage rules (a checked copy of src/lib/triage.ts) and verified customers ---
 import { classify, emailOf } from './_triage-rules.mjs';
-import { knownCustomerSet } from '../src/lib/known-customers.ts';
+import { loadSenderRules } from './_sender-rules.mjs';
 
 // --- Gmail ---------------------------------------------------------------
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
@@ -94,7 +94,9 @@ const QUERY = `in:anywhere newer_than:${DAYS}d -in:sent -in:drafts -in:chats`;
 const ids = await listAll({ q: QUERY, includeSpamTrash: 'true' });
 if (!ids.length) fail('No mail in the last ' + DAYS + ' days. Wrong mailbox?');
 
-const knownCustomers = knownCustomerSet();
+// Verified customers and spam senders: sender_rule rows from the setup seed,
+// kept OUTSIDE the repo (it is customer contact data). Optional.
+const { markedReal, markedSpam, source: rulesSource } = loadSenderRules(process.env.SENDER_RULES_FILE, fail);
 const byTier = { customer: [], bulk: [], spam: [] };
 
 await mapLimit(ids, 8, async (id) => {
@@ -114,7 +116,7 @@ await mapLimit(ids, 8, async (id) => {
     headers,
     labelIds: full.labelIds ?? [],
   };
-  const v = classify(msg, { everRepliedTo, knownCustomers });
+  const v = classify(msg, { everRepliedTo, markedReal, markedSpam });
   byTier[v.tier].push({ msg, v, at: Number(full.internalDate) });
 });
 
@@ -143,7 +145,7 @@ const perDay = (n) => (n / DAYS).toFixed(1);
 const exemptBy = (reason) => byTier.customer.filter((r) => r.v.exempt === reason).length;
 console.log('---');
 console.log(`mailbox ${MAILBOX}, last ${DAYS} days; list params: includeSpamTrash=true`);
-console.log(`${everRepliedTo.size} exempt senders from ${sentIds.length} sent messages (in:sent newer_than:180d); ${knownCustomers.size} owner-verified customers`);
-console.log(`customer only because of an exemption: ${exemptBy('we have replied to this sender before')} replied-to, ${exemptBy('owner verified this sender as a customer')} verified`);
+console.log(`${everRepliedTo.size} exempt senders from ${sentIds.length} sent messages (in:sent newer_than:180d); sender rules: ${markedReal.size} verified customers, ${markedSpam.size} spam senders (${rulesSource})`);
+console.log(`customer only because of an exemption: ${exemptBy('we have replied to this sender before')} replied-to, ${exemptBy('verified customer (sender rule)')} verified`);
 console.log(`spam with bulk signals too: ${byTier.spam.filter((r) => r.v.score >= 2).length}; spam on Gmail's label alone: ${byTier.spam.filter((r) => r.v.score < 2).length}`);
 console.log(`${perDay(ids.length)} received/day, ${perDay(byTier.customer.length)} customer/day, ${perDay(byTier.bulk.length)} bulk/day, ${perDay(byTier.spam.length)} spam/day`);

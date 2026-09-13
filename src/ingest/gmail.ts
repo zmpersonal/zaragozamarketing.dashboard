@@ -20,7 +20,6 @@ import { syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure } from '../db/failures.ts';
 import { GMAIL_READONLY, parseServiceAccount, serviceAccountToken, type ServiceAccountKey } from '../lib/google-auth.ts';
 import { classify, type Exemptions } from '../lib/triage.ts';
-import { knownCustomerSet } from '../lib/known-customers.ts';
 
 const WINDOW_DAYS = 30;
 export const RECEIVED_QUERY = `in:anywhere newer_than:${WINDOW_DAYS}d -in:sent -in:drafts -in:chats`;
@@ -46,7 +45,7 @@ async function receivedThreadIds(auth: Record<string, string>): Promise<{ messag
   return { messages, threadIds: [...threadIds] };
 }
 
-/** Exemptions from our own records: sender rules, verified customers, and everyone we have replied to. */
+/** Exemptions from our own records: sender rules (verified customers, spam senders) and everyone we have replied to. */
 async function loadExemptions(db: D1Database): Promise<Exemptions> {
   const rules = (await db.prepare('SELECT address, verdict FROM sender_rule').all<{ address: string; verdict: string }>()).results;
   const replied = (await db.prepare(`
@@ -57,7 +56,6 @@ async function loadExemptions(db: D1Database): Promise<Exemptions> {
     markedReal: new Set(rules.filter((r) => r.verdict === 'customer').map((r) => r.address.toLowerCase())),
     markedSpam: new Set(rules.filter((r) => r.verdict === 'spam').map((r) => r.address.toLowerCase())),
     everRepliedTo: new Set(replied.map((r) => r.address.toLowerCase())),
-    knownCustomers: knownCustomerSet(),
   };
 }
 

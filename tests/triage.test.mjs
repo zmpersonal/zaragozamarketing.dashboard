@@ -114,20 +114,20 @@ test('the no-reply rule only reads the local part, not the domain', () => {
 
 test('prove/_triage-rules.mjs classifies exactly like src/lib/triage.ts (tier, score, reasons)', async () => {
   const { classify: proveClassify } = await import('../prove/_triage-rules.mjs');
-  const { knownCustomerSet } = await import('../src/lib/known-customers.ts');
-  const senders = ['Dana <dana@example.com>', 'News <news@brand.example>', 'Cal <no-reply-calendar@google.com>',
-    'TF <testflight_no_reply@email.apple.com>', 'Noah <noah.replyman@example.com>', 'Priya <priya@acme.example>',
-    'A Customer <verified.customer@example.com>'];
+  const senders = ['Dana <dana@example.com>', 'News <news@brand.example>', 'Cal <no-reply-calendar@calendar.example>',
+    'TF <testflight_no_reply@apps.example>', 'Noah <noah.replyman@example.com>', 'Priya <priya@acme.example>',
+    'A Customer <verified.customer@example.com>', 'Spammer <known.spammer@example.com>'];
   const headerSets = [{}, { 'list-unsubscribe': '<mailto:u@x>' }, { 'list-id': '<x.list>' }, { precedence: 'bulk' },
     { 'auto-submitted': 'auto-generated' }, { 'x-mailer': 'Klaviyo' }, { 'list-id': '<x>', precedence: 'list' }];
   const labelSets = [[], ['INBOX'], ['SPAM'], ['CATEGORY_PROMOTIONS'], ['CATEGORY_SOCIAL'], ['SPAM', 'CATEGORY_PROMOTIONS'], ['CATEGORY_UPDATES']];
   const everRepliedTo = new Set(['priya@acme.example']);
-  const knownCustomers = knownCustomerSet();
+  const markedReal = new Set(['verified.customer@example.com']);
+  const markedSpam = new Set(['known.spammer@example.com']);
   let n = 0;
   for (const from of senders) for (const headers of headerSets) for (const labelIds of labelSets) {
     const m = { from, subject: 's', headers, labelIds };
-    const a = classify(m, { everRepliedTo, markedReal: new Set(), markedSpam: new Set(), knownCustomers });
-    const b = proveClassify(m, { everRepliedTo, knownCustomers });
+    const a = classify(m, { everRepliedTo, markedReal, markedSpam });
+    const b = proveClassify(m, { everRepliedTo, markedReal, markedSpam });
     const shape = (v) => ({ tier: v.tier, score: v.score, codes: v.signals.map((x) => x.code) });
     assert.deepEqual(shape(b), shape(a), `${from} ${JSON.stringify(headers)} ${labelIds}`);
     n++;

@@ -10,3 +10,6 @@ secrets/
 *.pem
 *service-account*.json
 inhouse-ops-*.json
+# Seed files with real addresses stay outside git; only *.example.sql is tracked.
+seeds/*
+!seeds/*.example.sql

@@ -1,10 +1,10 @@
 // Three tiers: customer, bulk, spam. Gmail's SPAM label routes to 'spam' and
-// ONLY there; it adds nothing to the bulk score. Our own reply history (and
-// the owner-verified known-customer list) beats Gmail's spam judgment.
+// ONLY there; it adds nothing to the bulk score. Our own reply history and
+// verified customers (sender_rule rows) beat Gmail's spam judgment.
+// Addresses here are fabricated: the tests prove the rule, not a person.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classify } from '../src/lib/triage.ts';
-import { KNOWN_CUSTOMERS, knownCustomerSet } from '../src/lib/known-customers.ts';
 
 const none = () => ({ everRepliedTo: new Set(), markedReal: new Set(), markedSpam: new Set() });
 const msg = (over = {}) => ({
@@ -72,27 +72,27 @@ test('a sender we have replied to before is customer even with Gmail SPAM and bu
   assert.equal(v.exemptReason, 'we have replied to this sender before');
 });
 
-// Real case (round 5 run, verified by hand by the owner): a genuine customer
-// whose message Gmail misfiled as spam.
-const REAL_CASE = msg({
-  from: 'A Customer <verified.customer@example.com>',
-  subject: 'Track A Shipment - Priority1 for A Customer',
+// The shape of the round-5 case (a verified customer whose message Gmail
+// filed as spam), with a fabricated address.
+const VERIFIED = 'verified.customer@example.com';
+const MISFILED = msg({
+  from: `A Customer <${VERIFIED}>`,
+  subject: 'Track a shipment for my order',
   labelIds: ['SPAM'],
 });
 
-test('real case: verified.customer@example.com with Gmail SPAM is customer via the known-customer list', () => {
-  assert.ok(KNOWN_CUSTOMERS.some((k) => k.address === 'verified.customer@example.com'));
-  const ex = { ...none(), knownCustomers: knownCustomerSet() };
-  const v = classify(REAL_CASE, ex);
+test('a verified customer (sender_rule customer) whose mail Gmail filed as spam is customer', () => {
+  const ex = none(); ex.markedReal.add(VERIFIED);
+  const v = classify(MISFILED, ex);
   assert.equal(v.tier, 'customer');
-  assert.equal(v.exemptReason, 'owner verified this sender as a customer');
+  assert.equal(v.exemptReason, 'verified customer (sender rule)');
 });
 
-test('real case without the exemption would be spam: the exemption is what saves it', () => {
-  assert.equal(classify(REAL_CASE, none()).tier, 'spam');
+test('the same message without the exemption would be spam: the exemption is what saves it', () => {
+  assert.equal(classify(MISFILED, none()).tier, 'spam');
 });
 
-test('known-customer addresses are matched case-insensitively', () => {
-  const ex = { ...none(), knownCustomers: knownCustomerSet() };
-  assert.equal(classify({ ...REAL_CASE, from: 'Dennis <verified.customer@example.com>' }, ex).tier, 'customer');
+test('verified-customer addresses are matched case-insensitively', () => {
+  const ex = none(); ex.markedReal.add(VERIFIED);
+  assert.equal(classify({ ...MISFILED, from: 'A Customer <Verified.Customer@Example.COM>' }, ex).tier, 'customer');
 });

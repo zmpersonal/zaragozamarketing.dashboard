@@ -89,11 +89,13 @@ test('a sender we replied to in another thread is customer even when Gmail files
   assert.equal((await triage(env, 'second')).tier, 'customer');
 });
 
-test('real case: verified.customer@example.com filed as spam is ingested as customer (known-customer list)', async () => {
+test('a verified customer (sender_rule row in the database) filed as spam is ingested as customer', async () => {
   const env = makeEnv();
-  await run(env, { dl: [inbound(ago(3), 'A Customer <verified.customer@example.com>', 'Track A Shipment - Priority1 for A Customer', { labelIds: ['SPAM'] })] });
-  assert.equal((await triage(env, 'dl')).tier, 'customer');
-  assert.equal((await row(env, 'dl')).status, 'waiting');
+  env.DB.raw.prepare(`INSERT INTO sender_rule (address, verdict, set_by, created_at) VALUES (?, 'customer', 'owner', 0)`)
+    .run('verified.customer@example.com');
+  await run(env, { v: [inbound(ago(3), 'A Customer <verified.customer@example.com>', 'Track a shipment for my order', { labelIds: ['SPAM'] })] });
+  assert.equal((await triage(env, 'v')).tier, 'customer');
+  assert.equal((await row(env, 'v')).status, 'waiting');
 });
 
 test('a triage verdict a human set is never overwritten by ingest', async () => {

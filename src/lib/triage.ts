@@ -8,7 +8,7 @@
  *             Gmail's spam label is wrong about some real customers, and a
  *             terse real customer can't be told from phishing by rule.
  * Gmail's SPAM label routes to 'spam' and ONLY there; it adds nothing to the
- * bulk score. Our own reply history and verified customers beat it.
+ * bulk score. Our own reply history and verified customers (sender_rule) beat it.
  *
  * Tuned for recall: we would rather show the agent a newsletter than
  * hide a customer. Nothing here deletes or hides anything; a demoted
@@ -45,13 +45,15 @@ interface Msg {
   labelIds: string[];                   // Gmail labelIds
 }
 
-/** Senders we have ever replied to, or the agent has marked as real. */
+/**
+ * Senders we have ever replied to (known_sender), and sender rules from the
+ * database (sender_rule): 'customer' rows are verified customers, 'spam' rows
+ * are spam senders. Never kept in code: that's customer contact data.
+ */
 export interface Exemptions {
   everRepliedTo: Set<string>;
   markedReal: Set<string>;
   markedSpam: Set<string>;
-  /** owner-verified customers (lib/known-customers.ts), lowercased */
-  knownCustomers?: Set<string>;
 }
 
 /**
@@ -79,8 +81,7 @@ export function classify(msg: Msg, ex: Exemptions): Verdict {
       { code: 'marked_spam', why: 'agent marked this sender as spam', weight: 0 },
     ] };
   }
-  if (ex.knownCustomers?.has(addr)) return customer('owner verified this sender as a customer');
-  if (ex.markedReal.has(addr)) return customer('agent marked this sender as a real customer');
+  if (ex.markedReal.has(addr)) return customer('verified customer (sender rule)');
   if (ex.everRepliedTo.has(addr)) return customer('we have replied to this sender before');
 
   const h = (name: string) => msg.headers[name.toLowerCase()] ?? '';

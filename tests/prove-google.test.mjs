@@ -19,7 +19,10 @@ function run(script, { keyFile, extraEnv = {} } = {}) {
     keyFile = join(dir, 'key.json');
     writeFileSync(keyFile, SERVICE_ACCOUNT_JSON, { mode: 0o600 });
   }
-  const env = { ...process.env, PROVE_SA_PUBLIC_JWK: JSON.stringify(PUBLIC_JWK), PROVE_TOKEN_LOG: tokenLog, ...extraEnv };
+  // Verified customers come from the setup seed (fabricated here), like production.
+  const rules = join(dir, 'sender-rules.sql');
+  writeFileSync(rules, readFileSync(new URL('../seeds/sender_rule.example.sql', import.meta.url), 'utf8'));
+  const env = { ...process.env, PROVE_SA_PUBLIC_JWK: JSON.stringify(PUBLIC_JWK), PROVE_TOKEN_LOG: tokenLog, SENDER_RULES_FILE: rules, ...extraEnv };
   if (keyFile === null) delete env.GOOGLE_SERVICE_ACCOUNT_FILE; else env.GOOGLE_SERVICE_ACCOUNT_FILE = keyFile;
   delete env.GOOGLE_CLIENT_ID; delete env.GOOGLE_CLIENT_SECRET; delete env.GOOGLE_REFRESH_TOKEN;
   const r = spawnSync(process.execPath, ['--import', './tests/helpers/google-preload.mjs', script, MAILBOX], {
@@ -70,7 +73,7 @@ test('prove/triage.mjs samples ALL received mail and prints three tiers in the r
     `${day(1 * D)} | dana@example.com | Sauna heater tripping the breaker`,
     `${day(2 * D)} | sam@example.com | Re: chiller warranty question and the 220v wiring `,
     `${day(6 * D)} | priya@acme.example | Invoice 2214`,
-    `${day(7 * D)} | verified.customer@example.com | Track A Shipment - Priority1 for A Customer`,
+    `${day(7 * D)} | verified.customer@example.com | Track a shipment for my order`,
   ]);
   assert.doesNotMatch(r.stdout, /old@example\.com|team@inhousewellness\.com/, 'outside the window and chats are excluded');
   noSecrets(r);
