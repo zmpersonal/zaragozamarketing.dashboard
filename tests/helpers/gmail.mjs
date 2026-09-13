@@ -59,9 +59,18 @@ function scanLedger(threads) {
       if (before === now) continue;
       L.historyId += 1;
       const ref = { id: key, threadId };
-      L.records.push(before === undefined
-        ? { id: String(L.historyId), messages: [ref], messagesAdded: [{ message: { ...ref, labelIds } }] }
-        : { id: String(L.historyId), messages: [ref], labelsAdded: [{ message: { ...ref, labelIds }, labelIds }] });
+      if (before === undefined) {
+        L.records.push({ id: String(L.historyId), messages: [ref], messagesAdded: [{ message: { ...ref, labelIds } }] });
+      } else {
+        const was = JSON.parse(before);
+        const added = labelIds.filter((l) => !was.includes(l));
+        const removed = was.filter((l) => !labelIds.includes(l));
+        L.records.push({
+          id: String(L.historyId), messages: [ref],
+          ...(added.length ? { labelsAdded: [{ message: { ...ref, labelIds }, labelIds: added }] } : {}),
+          ...(removed.length ? { labelsRemoved: [{ message: { ...ref, labelIds }, labelIds: removed }] } : {}),
+        });
+      }
       L.seen.set(key, now);
     }
   }
@@ -86,7 +95,10 @@ function search(threads, q, includeSpamTrash) {
   for (const token of q.trim().split(/\s+/)) {
     let m;
     if (token === 'in:anywhere') anywhere = true;
-    else if ((m = token.match(/^in:(inbox|sent)$/))) pool = pool.filter((x) => x.raw || x.labelIds.includes(LABEL[m[1]]));
+    else if ((m = token.match(/^in:(inbox|sent|trash|spam)$/))) {
+      pool = pool.filter((x) => !x.raw && x.labelIds.includes(LABEL[m[1]]));
+      if (m[1] === 'trash' || m[1] === 'spam') anywhere = true; // asking for trash/spam by name, with includeSpamTrash, returns it
+    }
     else if ((m = token.match(/^-in:(sent|drafts|chats|spam|trash)$/))) pool = pool.filter((x) => !x.labelIds.includes(LABEL[m[1]]));
     else if ((m = token.match(/^newer_than:(\d+)d$/))) pool = pool.filter((x) => x.raw || x.at >= Date.now() - Number(m[1]) * 86400_000);
     else throw new Error('fake Gmail does not understand query token: ' + token);
@@ -131,7 +143,10 @@ export async function withGmail(threads, fn, { onToken, onGmail, requests, pageS
       if (Number(start) < L.expiredBefore || Number(start) > L.historyId) {
         return new Response(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND' } }), { status: 404 });
       }
-      const after = L.records.filter((r) => Number(r.id) > Number(start));
+      // historyTypes filters records to those carrying a matching change (Gmail returns all types when absent).
+      const KEY = { messageAdded: 'messagesAdded', messageDeleted: 'messagesDeleted', labelAdded: 'labelsAdded', labelRemoved: 'labelsRemoved' };
+      const types = url.searchParams.getAll('historyTypes').map((t) => KEY[t]);
+      const after = L.records.filter((r) => Number(r.id) > Number(start) && (!types.length || types.some((k) => r[k])));
       const offset = Number(url.searchParams.get('pageToken') ?? 0);
       const size = Math.min(pageSize, Number(url.searchParams.get('maxResults') ?? 100));
       const page = after.slice(offset, offset + size);

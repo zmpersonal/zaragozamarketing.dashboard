@@ -21,9 +21,10 @@
  * Auth: GOOGLE_SERVICE_ACCOUNT_FILE (service account, domain-wide
  * delegation, gmail.readonly, impersonating the mailbox).
  */
-import { writeFileSync, chmodSync, realpathSync, existsSync } from 'node:fs';
-import { resolve, dirname, relative, isAbsolute } from 'node:path';
+import { writeFileSync, chmodSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { gmailAccessToken } from './_google.mjs';
+import { isOutsideRepo } from './_outside-repo.mjs';
 
 const args = process.argv.slice(2);
 const MAILBOX = args[0]?.startsWith('--') ? undefined : args[0];
@@ -40,11 +41,8 @@ function fail(msg) {
 if (!MAILBOX) fail('Pass a mailbox: node prove/backfill-known-senders.mjs support@inhousewellness.com --out <file outside the repo>');
 if (!OUT) fail('Pass --out <file>: a path outside the repo (the file holds customer addresses).');
 
-const repo = realpathSync(new URL('..', import.meta.url).pathname);
 const outPath = resolve(OUT);
-const outDir = existsSync(dirname(outPath)) ? realpathSync(dirname(outPath)) : dirname(outPath);
-const rel = relative(repo, outDir);
-if (rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))) fail('--out must be outside the repo; customer addresses never go in it.');
+if (!isOutsideRepo(outPath)) fail('--out must be outside the repo; customer addresses never go in it.');
 
 const token = await gmailAccessToken(MAILBOX, fail);
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';

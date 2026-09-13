@@ -31,8 +31,9 @@ class Statement {
   }
 }
 
-export function makeD1() {
-  const db = new DatabaseSync(':memory:');
+/** An in-memory database, or a file that keeps its rows between runs (schema.sql is idempotent). */
+export function makeD1(file = ':memory:') {
+  const db = new DatabaseSync(file);
   db.exec(readFileSync(SCHEMA, 'utf8'));
   return {
     raw: db,
