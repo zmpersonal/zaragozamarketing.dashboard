@@ -51,17 +51,22 @@ for (const kind of ['called', 'replied']) {
   });
 }
 
-test("a contact action without a status still counts as a reply", async () => {
+test("a contact action with no status chosen records the contact but leaves the clock running", async () => {
   const e = env();
   const mailbox = { t1: [inbound(hoursAgo(2), DANA)] };
   await withGmail(mailbox, () => ingestGmail(e));
+  const { awaiting_since } = await row(e, 't1');
 
   await logAction(e, { thread_id: 'gmail:t1', kind: 'called' });
-  await withGmail(mailbox, () => ingestGmail(e));
+  let t = await row(e, 't1');
+  assert.notEqual(t.last_outbound_at, null, 'contact recorded');
+  assert.equal(t.status, 'waiting');
+  assert.equal(t.awaiting_since, awaiting_since);
 
-  const t = await row(e, 't1');
-  assert.equal(t.status, 'answered');
-  assert.equal(t.awaiting_since, null);
+  await withGmail(mailbox, () => ingestGmail(e));
+  t = await row(e, 't1');
+  assert.equal(t.status, 'waiting');
+  assert.equal(t.awaiting_since, awaiting_since);
 });
 
 test('customer writes again after the call: sync reopens the clock from that message', async () => {
@@ -96,27 +101,48 @@ test("a note is not contact: it sets no last_outbound_at, and the sync keeps the
   assert.notEqual(t.awaiting_since, null);
 });
 
-test('calling on a blocked thread records the contact but keeps it blocked', async () => {
+test("calling and marking blocked records the contact, keeps it blocked, and does not stop the clock", async () => {
   const e = env();
   const mailbox = { t1: [inbound(hoursAgo(2), DANA)] };
   await withGmail(mailbox, () => ingestGmail(e));
+  const { awaiting_since } = await row(e, 't1');
 
   await logAction(e, { thread_id: 'gmail:t1', kind: 'called', status: 'blocked', blocked_on: 'supplier' });
   await withGmail(mailbox, () => ingestGmail(e));
 
   const t = await row(e, 't1');
   assert.equal(t.status, 'blocked');
-  assert.equal(t.awaiting_since, null);
+  assert.equal(t.awaiting_since, awaiting_since, "only 'answered' or 'closed' clears the clock");
   assert.notEqual(t.last_outbound_at, null);
 });
 
-test("logging a call with 'still needs a reply' still stops the clock: contact is a reply", async () => {
+test("voicemail: 'called' + 'still needs a reply' records contact, keeps the clock running, and the sync agrees", async () => {
+  const e = env();
+  const mailbox = { t1: [inbound(hoursAgo(2), DANA)] };
+  await withGmail(mailbox, () => ingestGmail(e));
+  const { awaiting_since } = await row(e, 't1');
+
+  const before = Math.floor(Date.now() / 1000);
+  await logAction(e, { thread_id: 'gmail:t1', kind: 'called', body: 'Left a voicemail.', status: 'waiting' });
+  let t = await row(e, 't1');
+  assert.ok(t.last_outbound_at >= before, 'the call is recorded as contact');
+  assert.equal(t.status, 'waiting');
+  assert.equal(t.awaiting_since, awaiting_since, 'clock not reset or cleared');
+
+  await withGmail(mailbox, () => ingestGmail(e));
+  t = await row(e, 't1');
+  assert.equal(t.status, 'waiting', 'the sync does not treat the voicemail as a reply');
+  assert.equal(t.awaiting_since, awaiting_since);
+});
+
+test("'replied' + 'closed' clears the clock", async () => {
   const e = env();
   const mailbox = { t1: [inbound(hoursAgo(2), DANA)] };
   await withGmail(mailbox, () => ingestGmail(e));
 
-  await logAction(e, { thread_id: 'gmail:t1', kind: 'called', status: 'waiting' });
+  await logAction(e, { thread_id: 'gmail:t1', kind: 'replied', status: 'closed' });
   const t = await row(e, 't1');
-  assert.equal(t.status, 'answered');
+  assert.equal(t.status, 'closed');
   assert.equal(t.awaiting_since, null);
+  assert.notEqual(t.last_outbound_at, null);
 });

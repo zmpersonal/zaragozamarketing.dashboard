@@ -57,11 +57,12 @@ export function oldestUnanswered(timeline: Observed[]): number | null {
  * - blocked: a human set it, so it stays blocked, but the clock still runs.
  * - otherwise: waiting if anything is unanswered, else answered.
  *
- * The stored last_outbound_at is treated as one more outbound event, so
- * contact an agent logged in the console (a phone call on an email thread)
- * counts as a reply even though the provider never saw it. Ingest can
- * therefore never resurrect 'waiting' while last_outbound_at is newer than
- * the newest inbound message.
+ * A contact the agent logged and RESOLVED (awaiting_since cleared, e.g. a
+ * call marked answered) is treated as one more outbound event, so ingest
+ * never resurrects 'waiting' from an inbound that contact already answered.
+ * A contact the agent did not resolve (a voicemail: last_outbound_at set,
+ * awaiting_since still running) does not stop the clock; the agent's status
+ * choice is authoritative.
  *
  * Once a thread is awaiting, awaiting_since holds until we are seen to reply.
  * That keeps a reopened thread from sliding back to a pre-close message on
@@ -69,8 +70,9 @@ export function oldestUnanswered(timeline: Observed[]): number | null {
  * latest activity) keep the start of a run of unanswered texts.
  */
 export function resolveState(existing: Existing | null, observed: Observed[]): ResolvedState {
-  const timeline = existing?.last_outbound_at != null
-    ? [...observed, { at: existing.last_outbound_at, inbound: false }]
+  const resolvedContact = existing?.last_outbound_at != null && existing.awaiting_since === null;
+  const timeline = resolvedContact
+    ? [...observed, { at: existing.last_outbound_at as number, inbound: false }]
     : observed;
 
   if (existing?.status === 'closed') {

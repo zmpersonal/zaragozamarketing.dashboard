@@ -34,7 +34,12 @@ const json = (data: unknown, status = 200) =>
 
 const now = () => Math.floor(Date.now() / 1000);
 
-/** Action kinds that reach the customer. Logging one counts as a reply. */
+/**
+ * Action kinds that reach the customer. Logging one always records contact
+ * (last_outbound_at). Whether it resolves the wait is the agent's call: only
+ * a status of 'answered' or 'closed' stops the clock. A voicemail is contact,
+ * not resolution.
+ */
 const CONTACT_KINDS = new Set(['replied', 'called']);
 
 /**
@@ -216,22 +221,17 @@ export default {
         ).bind(b.thread_id, user.email, b.kind, b.body ?? null, now()),
       ];
 
-      // Contact with the customer ('replied', 'called') is a reply wherever it
-      // happened: it stamps last_outbound_at and stops the clock, and ingest
-      // treats that stamp as an outbound message (lib/thread-state.ts), so the
-      // next sync cannot flip the thread back to waiting. Other kinds (notes,
-      // escalations) change status only if one was chosen, and never
-      // last_outbound_at.
+      // The agent's chosen status is authoritative. Contact ('replied',
+      // 'called') always stamps last_outbound_at; the clock stops only if the
+      // agent chose 'answered' or 'closed'. Ingest honours that: a stored
+      // contact ends the wait only while awaiting_since is cleared
+      // (lib/thread-state.ts). Other kinds never touch last_outbound_at.
       const contact = CONTACT_KINDS.has(b.kind);
       if (b.status || contact) {
         batch.push(
           env.DB.prepare(
             `UPDATE thread
-             SET status = CASE
-                   WHEN ?2 IS NULL THEN CASE WHEN ?7 AND status = 'waiting' THEN 'answered' ELSE status END
-                   WHEN ?7 AND ?2 = 'waiting' THEN 'answered'
-                   ELSE ?2
-                 END,
+             SET status = COALESCE(?2, status),
                  blocked_on   = CASE WHEN ?2 IS NULL THEN blocked_on ELSE ?3 END,
                  blocked_note = CASE WHEN ?2 IS NULL THEN blocked_note ELSE ?4 END,
                  -- set on the move to blocked, kept while it stays blocked, cleared on leaving
@@ -243,8 +243,12 @@ export default {
                  assignee = COALESCE(assignee, ?5),
                  last_outbound_at = CASE WHEN ?7 THEN ?6 ELSE last_outbound_at END,
                  closed_at = CASE WHEN ?2 IS NULL THEN closed_at WHEN ?2 = 'closed' THEN ?6 ELSE NULL END,
-                 -- contact or closing means caught up; a later inbound starts the clock again
-                 awaiting_since = CASE WHEN ?7 OR ?2 = 'closed' THEN NULL ELSE awaiting_since END
+                 -- only the agent choosing 'answered' (with contact) or 'closed' stops the clock
+                 awaiting_since = CASE
+                   WHEN ?2 = 'closed' THEN NULL
+                   WHEN ?7 AND ?2 = 'answered' THEN NULL
+                   ELSE awaiting_since
+                 END
              WHERE id = ?1`
           ).bind(
             b.thread_id, b.status ?? null, b.blocked_on ?? null, b.blocked_note ?? null,
