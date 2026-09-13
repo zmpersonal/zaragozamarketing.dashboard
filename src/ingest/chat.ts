@@ -9,7 +9,7 @@
  * in the waiting count, but you still want to see it, because a bot that
  * "handled" something badly is how you lose a sale quietly.
  */
-import type { Env } from '../index';
+import type { Env } from '../index.ts';
 
 export interface NormalisedChat {
   externalId: string;

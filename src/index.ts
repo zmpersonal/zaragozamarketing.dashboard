@@ -6,8 +6,8 @@
  * keeps polling Gmail and Quo and keeps serving the board.
  */
 
-import { ingestGmail } from './ingest/gmail';
-import { ingestQuo } from './ingest/quo';
+import { ingestGmail } from './ingest/gmail.ts';
+import { ingestQuo } from './ingest/quo.ts';
 
 export interface Env {
   DB: D1Database;

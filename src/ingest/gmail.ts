@@ -5,7 +5,7 @@
  * decides waiting vs answered by looking at the direction of the LAST
  * message. That single rule is what makes the board honest.
  */
-import type { Env } from '../index';
+import type { Env } from '../index.ts';
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 

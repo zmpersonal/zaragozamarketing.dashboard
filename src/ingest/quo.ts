@@ -3,7 +3,7 @@
  *
  * The cron is the safety net. Webhooks in /hooks/quo are the fast path.
  */
-import type { Env } from '../index';
+import type { Env } from '../index.ts';
 
 const API = 'https://api.quo.com/';
 const API_VERSION = '2026-03-30';
