@@ -1,5 +1,14 @@
 /**
- * Triage — is this a real person writing to us, or bulk mail?
+ * Triage — is this a real person writing to us, bulk mail, or spam?
+ *
+ * Three tiers, and nothing is ever hidden in any of them:
+ *   customer  needs a reply
+ *   bulk      probably not a customer (structural bulk-mail signals)
+ *   spam      Gmail (or an agent) judged it spam. Kept visible and scannable:
+ *             Gmail's spam label is wrong about some real customers, and a
+ *             terse real customer can't be told from phishing by rule.
+ * Gmail's SPAM label routes to 'spam' and ONLY there; it adds nothing to the
+ * bulk score. Our own reply history and verified customers beat it.
  *
  * Tuned for recall: we would rather show the agent a newsletter than
  * hide a customer. Nothing here deletes or hides anything; a demoted
@@ -11,14 +20,19 @@
  * subscription lapses.
  */
 
+export type Tier = 'customer' | 'bulk' | 'spam';
+
 export interface Signal {
   code: string;
   why: string;
-  weight: number;   // 1 = suggestive, 2 = on its own enough
+  weight: number;   // bulk weight: 1 = suggestive, 2 = on its own enough; 0 = spam, not bulk
 }
 
 export interface Verdict {
+  tier: Tier;
+  /** tier !== 'customer' */
   demote: boolean;
+  /** bulk score only; the spam label never counts */
   score: number;
   signals: Signal[];
   exemptReason?: string;
@@ -36,6 +50,8 @@ export interface Exemptions {
   everRepliedTo: Set<string>;
   markedReal: Set<string>;
   markedSpam: Set<string>;
+  /** owner-verified customers (lib/known-customers.ts), lowercased */
+  knownCustomers?: Set<string>;
 }
 
 /**
@@ -54,18 +70,18 @@ export function classify(msg: Msg, ex: Exemptions): Verdict {
   const addr = emailOf(msg.from);
   const signals: Signal[] = [];
 
-  // --- exemptions win outright -------------------------------------
+  const customer = (exemptReason: string): Verdict =>
+    ({ tier: 'customer', demote: false, score: 0, signals: [], exemptReason });
+
+  // --- exemptions win outright, over every signal including Gmail spam --
   if (ex.markedSpam.has(addr)) {
-    return { demote: true, score: 99, signals: [
-      { code: 'marked_spam', why: 'agent marked this sender as spam', weight: 2 },
+    return { tier: 'spam', demote: true, score: 0, signals: [
+      { code: 'marked_spam', why: 'agent marked this sender as spam', weight: 0 },
     ] };
   }
-  if (ex.markedReal.has(addr)) {
-    return { demote: false, score: 0, signals: [], exemptReason: 'agent marked this sender as a real customer' };
-  }
-  if (ex.everRepliedTo.has(addr)) {
-    return { demote: false, score: 0, signals: [], exemptReason: 'we have replied to this sender before' };
-  }
+  if (ex.knownCustomers?.has(addr)) return customer('owner verified this sender as a customer');
+  if (ex.markedReal.has(addr)) return customer('agent marked this sender as a real customer');
+  if (ex.everRepliedTo.has(addr)) return customer('we have replied to this sender before');
 
   const h = (name: string) => msg.headers[name.toLowerCase()] ?? '';
   const labels = new Set(msg.labelIds);
@@ -89,8 +105,10 @@ export function classify(msg: Msg, ex: Exemptions): Verdict {
   if (labels.has('CATEGORY_SOCIAL')) {
     signals.push({ code: 'gmail_social', why: 'Gmail filed it under Social', weight: 2 });
   }
-  if (labels.has('SPAM')) {
-    signals.push({ code: 'gmail_spam', why: 'Gmail marked it as spam', weight: 2 });
+  // Spam is its own tier, not a heavier bulk signal: weight 0, and see below.
+  const gmailSpam = labels.has('SPAM');
+  if (gmailSpam) {
+    signals.push({ code: 'gmail_spam', why: 'Gmail marked it as spam', weight: 0 });
   }
 
   // --- automated mail that isn't marketing --------------------------
@@ -114,6 +132,7 @@ export function classify(msg: Msg, ex: Exemptions): Verdict {
 
   const score = signals.reduce((n, s) => n + s.weight, 0);
 
-  // Two suggestive signals, or one decisive one.
-  return { demote: score >= 2, score, signals };
+  // Spam wins over bulk; otherwise two suggestive bulk signals, or one decisive one.
+  const tier: Tier = gmailSpam ? 'spam' : score >= 2 ? 'bulk' : 'customer';
+  return { tier, demote: tier !== 'customer', score, signals };
 }
