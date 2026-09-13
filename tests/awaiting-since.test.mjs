@@ -7,6 +7,7 @@ import { ingestGmail } from '../src/ingest/gmail.ts';
 import { ingestQuo } from '../src/ingest/quo.ts';
 import { upsertChat } from '../src/ingest/chat.ts';
 import { makeEnv, withGmail, inbound, outbound, row, at } from './helpers/gmail.mjs';
+import { makeQuoEnv, makeQuoAccount, withQuo as withQuoApi } from './helpers/quo.mjs';
 
 const DANA = 'Dana Reyes <dana@example.com>';
 const T0 = '2026-09-15T09:00:00-05:00'; // Tue: Dana writes in
@@ -141,46 +142,41 @@ test('guard: new inbound on a BLOCKED thread keeps it blocked, but the clock sta
 
 // --- Quo and chat follow the same rules ---------------------------------------
 
-async function withQuo(conversations, fn) {
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
-    const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
-    if (url.origin + url.pathname === 'https://api.quo.com/conversations') {
-      return new Response(JSON.stringify({ data: conversations }), { headers: { 'content-type': 'application/json' } });
-    }
-    throw new Error('unexpected fetch in test: ' + url.href);
-  };
-  try { return await fn(); } finally { globalThis.fetch = realFetch; }
-}
-
-function quoEnv() {
-  const env = makeEnv();
-  env.QUO_API_KEY = 'test-key';
-  env.DB.raw.exec(`INSERT INTO source (id, brand_id, channel, provider, address)
-                   VALUES ('quo:PN1', 'inhouse', 'phone', 'quo', 'PN1')`);
-  return env;
-}
-const convo = (iso, direction) => ({
-  id: 'CN1', name: 'Marcus Bell', participants: ['+15125550142'],
-  lastActivityAt: iso, lastActivityDirection: direction, lastActivityType: 'message', previewText: 'hi',
-});
+// Quo polls messages since a cursor (tests/quo-ingest.test.mjs covers the
+// interleaving cases); these check it applies the same first-contact and
+// reopen rules as Gmail.
+const quoAt = async (env, account, iso) => {
+  const realNow = Date.now;
+  Date.now = () => Date.parse(iso) + 5 * 60_000;
+  try { await withQuoApi(account, () => ingestQuo(env)); } finally { Date.now = realNow; }
+};
 const quoRow = (env) => env.DB.prepare(`SELECT * FROM thread WHERE id = 'quo:CN1'`).first();
 
 test('Quo first contact: waiting, awaiting_since = arrival', async () => {
-  const env = quoEnv();
-  await withQuo([convo(T0, 'incoming')], () => ingestQuo(env));
+  const env = makeQuoEnv();
+  const account = makeQuoAccount();
+  account.conversation('CN1', { createdAt: at(T0) });
+  account.text('CN1', at(T0), 'incoming');
+  await quoAt(env, account, T0);
+
   const t = await quoRow(env);
   assert.equal(t.status, 'waiting');
   assert.equal(t.awaiting_since, at(T0));
   assert.equal(t.conversation_started_at, at(T0));
 });
 
-test('Quo reopen: incoming activity after close -> waiting, awaiting_since = that activity', async () => {
-  const env = quoEnv();
-  await withQuo([convo(T0, 'incoming')], () => ingestQuo(env));
-  await withQuo([convo(T1, 'outgoing')], () => ingestQuo(env));
+test('Quo reopen: incoming text after close -> waiting, awaiting_since = that text', async () => {
+  const env = makeQuoEnv();
+  const account = makeQuoAccount();
+  account.conversation('CN1', { createdAt: at(T0) });
+  account.text('CN1', at(T0), 'incoming');
+  await quoAt(env, account, T0);
+  account.text('CN1', at(T1), 'outgoing');
+  await quoAt(env, account, T1);
   await closeThread(env, 'quo:CN1', T2);
-  await withQuo([convo(T4, 'incoming')], () => ingestQuo(env));
+
+  account.text('CN1', at(T4), 'incoming');
+  await quoAt(env, account, T4);
 
   const t = await quoRow(env);
   assert.equal(t.status, 'waiting');

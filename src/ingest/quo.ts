@@ -1,22 +1,102 @@
 /**
- * Quo (formerly OpenPhone) ingest — calls and texts.
+ * Quo (formerly OpenPhone) ingest — texts and calls.
  *
- * The cron is the safety net. Webhooks in /hooks/quo are the fast path.
+ * The webhook (/hooks/quo) is the fast path; this poll is the backstop that
+ * guarantees every inbound is observed, even when a later outbound in the
+ * same conversation supersedes it before we look. It reads individual
+ * messages and calls created since a cursor stored per source, never just a
+ * conversation's latest activity (which hid an inbound answered between polls).
+ *
+ * Quo v1 API (www.quo.com/docs/mdx/api-reference). The dated 2026-03-30 API
+ * does not list messages yet; v1 "remains fully supported".
+ *   GET /v1/conversations  phoneNumbers[], maxResults; newest activity first
+ *   GET /v1/messages       phoneNumberId, participants[] (required), createdAfter
+ *   GET /v1/calls          phoneNumberId, participants (max 1), createdAfter
+ * Auth is the raw key in Authorization (no Bearer).
  */
 import type { Env } from '../index.ts';
+import type { Observed } from '../lib/thread-state.ts';
 import { syncThread } from '../db/threads.ts';
 
-const API = 'https://api.quo.com/';
-const API_VERSION = '2026-03-30';
+const API = 'https://api.quo.com/v1/';
+const PAGE = '100';
+/** First poll for a source reads this far back. Matches Gmail's 30-day window. */
+const BACKFILL_SECONDS = 30 * 86400;
+/** Re-read a little before the cursor, for items indexed late. Re-reads are idempotent. */
+const OVERLAP_SECONDS = 5 * 60;
 
-async function quo(env: Env, path: string, params: Record<string, string> = {}) {
+const secs = (isoDate: string) => Math.floor(Date.parse(isoDate) / 1000);
+const isoOf = (unix: number) => new Date(unix * 1000).toISOString();
+
+interface QuoConversation {
+  id: string;
+  phoneNumberId: string;
+  participants: string[];
+  name?: string | null;
+  createdAt: string;
+  lastActivityAt?: string | null;
+}
+interface QuoMessage { direction: 'incoming' | 'outgoing'; status?: string; createdAt: string; text?: string }
+interface QuoCall { direction: 'incoming' | 'outgoing'; createdAt: string; answeredAt?: string | null }
+
+async function quo<T>(env: Env, path: string, params: [string, string][]): Promise<{ data: T[]; nextPageToken?: string | null }> {
   const url = new URL(API + path);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await fetch(url, {
-    headers: { Authorization: env.QUO_API_KEY, 'Quo-Api-Version': API_VERSION },
-  });
+  for (const [k, v] of params) url.searchParams.append(k, v);
+  const res = await fetch(url, { headers: { Authorization: env.QUO_API_KEY } });
   if (!res.ok) throw new Error(`Quo ${path} -> ${res.status}`);
-  return res.json<any>();
+  return res.json();
+}
+
+/** Every page of a list endpoint. */
+async function all<T>(env: Env, path: string, params: [string, string][]): Promise<T[]> {
+  const out: T[] = [];
+  let pageToken: string | null | undefined;
+  do {
+    const page = await quo<T>(env, path, pageToken ? [...params, ['pageToken', pageToken]] : params);
+    out.push(...page.data);
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+/** Conversations with activity at or after `since`. Pages stop once they are older (newest first). */
+async function activeConversations(env: Env, phone: string, since: number): Promise<QuoConversation[]> {
+  const out: QuoConversation[] = [];
+  let pageToken: string | null | undefined;
+  do {
+    const params: [string, string][] = [['phoneNumbers', phone], ['maxResults', PAGE]];
+    if (pageToken) params.push(['pageToken', pageToken]);
+    const page = await quo<QuoConversation>(env, 'conversations', params);
+    for (const c of page.data) {
+      if (secs(c.lastActivityAt ?? c.createdAt) < since) return out;
+      out.push(c);
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return out;
+}
+
+/**
+ * One conversation's activity as a timeline. Contact means the customer was
+ * actually reached: an outgoing text that was not undelivered, or a call that
+ * was answered. An incoming call that was answered is the customer reaching
+ * us and us picking up, so it is an inbound followed by contact.
+ */
+function toTimeline(messages: QuoMessage[], calls: QuoCall[]): Observed[] {
+  const timeline: Observed[] = [];
+  for (const m of messages) {
+    if (m.direction === 'incoming') timeline.push({ at: secs(m.createdAt), inbound: true });
+    else if (m.status !== 'undelivered') timeline.push({ at: secs(m.createdAt), inbound: false });
+  }
+  for (const c of calls) {
+    if (c.direction === 'incoming') {
+      timeline.push({ at: secs(c.createdAt), inbound: true });
+      if (c.answeredAt) timeline.push({ at: secs(c.answeredAt), inbound: false });
+    } else if (c.answeredAt) {
+      timeline.push({ at: secs(c.answeredAt), inbound: false });
+    }
+  }
+  return timeline.sort((a, b) => a.at - b.at);
 }
 
 export async function ingestQuo(env: Env) {
@@ -25,42 +105,64 @@ export async function ingestQuo(env: Env) {
 
   for (const src of sources) {
     try {
-      // limit maxes out at 50 per Quo's docs, and the key is rate limited
-      // to 10 req/sec. At our volume one page is plenty; paginate with
-      // `after` + nextCursor if a backlog ever exceeds it.
-      const convos = await quo(env, 'conversations', {
-        phoneNumberId: src.address,
-        limit: '50',
-      });
+      const now = Math.floor(Date.now() / 1000);
+      const cursor: number | null = src.sync_cursor ? Number(src.sync_cursor) : null;
+      const since = (cursor ?? now - BACKFILL_SECONDS) - OVERLAP_SECONDS;
 
-      for (const c of convos.data ?? []) {
-        const at = Math.floor(new Date(c.lastActivityAt ?? c.updatedAt).getTime() / 1000);
-        const inbound = c.lastActivityDirection === 'incoming';
+      let highWater = cursor;
+      let anyFailed = false;
 
-        // Quo's conversation list only reports the LATEST activity, so the
-        // timeline is one event. lib/thread-state.ts holds an existing
-        // awaiting_since across polls, which is what keeps the start of a run
-        // of unanswered texts. conversation_started_at is when we first saw the
-        // conversation, not necessarily its first message.
-        await syncThread(env.DB, {
-          id: `quo:${c.id}`,
-          source_id: src.id,
-          brand_id: src.brand_id,
-          channel: 'phone',
-          subject: c.lastActivityType === 'call' ? 'Call' : 'Text',
-          customer_name: c.name ?? null,
-          customer_handle: c.participants?.[0] ?? null,
-          refresh_customer: false,
-          preview: (c.previewText ?? '').slice(0, 200),
-          conversation_started_at: at,
-          newest_inbound_at: inbound ? at : null,
-          newest_outbound_at: inbound ? null : at,
-          timeline: [{ at, inbound }],
-        }, Math.floor(Date.now() / 1000));
+      for (const c of await activeConversations(env, src.address, since)) {
+        // One failing conversation is logged and skipped; the others still sync.
+        try {
+          const base: [string, string][] = [
+            ['phoneNumberId', c.phoneNumberId],
+            ...c.participants.map((p): [string, string] => ['participants', p]),
+            ['createdAfter', isoOf(since)],
+            ['maxResults', PAGE],
+          ];
+          const messages = await all<QuoMessage>(env, 'messages', base);
+          // The calls endpoint accepts a single participant, so group threads have no call history.
+          const calls = c.participants.length === 1 ? await all<QuoCall>(env, 'calls', base) : [];
+
+          const timeline = toTimeline(messages, calls);
+          if (!timeline.length) continue;
+
+          const newest = (inbound: boolean): number | null => {
+            const times = timeline.filter((m) => m.inbound === inbound).map((m) => m.at);
+            return times.length ? Math.max(...times) : null;
+          };
+          const latest = [...messages].sort((a, b) => secs(b.createdAt) - secs(a.createdAt))[0];
+
+          await syncThread(env.DB, {
+            id: `quo:${c.id}`,
+            source_id: src.id,
+            brand_id: src.brand_id,
+            channel: 'phone',
+            subject: messages.length ? 'Text' : 'Call',
+            customer_name: c.name ?? null,
+            customer_handle: c.participants[0] ?? null,
+            refresh_customer: false,
+            preview: (latest?.text ?? '').slice(0, 200),
+            conversation_started_at: secs(c.createdAt),
+            newest_inbound_at: newest(true),
+            newest_outbound_at: newest(false),
+            timeline,
+          }, now);
+
+          const last = timeline[timeline.length - 1].at;
+          highWater = highWater === null ? last : Math.max(highWater, last);
+        } catch (err) {
+          anyFailed = true;
+          console.error(`quo ingest skipped conversation ${c.id} on ${src.address}`, err);
+        }
       }
 
-      await env.DB.prepare(`UPDATE source SET last_synced_at = ?2 WHERE id = ?1`)
-        .bind(src.id, Math.floor(Date.now() / 1000)).run();
+      // Advance the cursor only when every conversation synced. Otherwise hold
+      // it, so the failed conversation's messages are read again next poll.
+      await env.DB.prepare(
+        `UPDATE source SET last_synced_at = ?2, sync_cursor = CASE WHEN ?3 THEN sync_cursor ELSE ?4 END WHERE id = ?1`
+      ).bind(src.id, now, anyFailed ? 1 : 0, highWater === null ? null : String(highWater)).run();
     } catch (err) {
       console.error(`quo ingest failed for ${src.address}`, err);
     }
