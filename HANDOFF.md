@@ -3,7 +3,7 @@
 This file holds open questions and known-wrong things carried forward. Remove an item only once
 it's fixed and proven, or once the owner decides it.
 
-Last updated: round 4, 2026-09-13.
+Last updated: round 5, 2026-09-13.
 
 ---
 
@@ -69,55 +69,89 @@ second agent or brand team is added.
 
 ---
 
-## Real-data findings: `prove/triage.mjs` on support@, 30 days (round 4)
+## Real-data findings: `prove/triage.mjs` on support@, 30 days (round 5, full stream)
 
-Rules were **not** changed. These are observations for the owner to judge.
+The round-4 run sampled `in:inbox`, which is the residue, not the stream: 46 messages, biased
+toward ambiguous mail. **Every round-4 triage conclusion is withdrawn.** Round 5 sampled the
+whole received stream.
+- **Query:** `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats` with
+  `includeSpamTrash=true`, paged to the end.
+- **Result:** 284 messages (9.5/day): 39 kept (1.3/day) and 245 demoted (8.2/day).
+- **Exemptions:** 47 exempt senders, built from 147 sent messages over 180 days. 20 of the kept
+  messages were kept only because of an exemption.
 
-### Volume
-- 46 messages in 30 days: 30 kept (1.0/day), 16 demoted (0.5/day). 47 exempt senders.
-- The owner's premise was 10–20 messages a day. The script queries `in:inbox newer_than:30d`,
-  so anything archived by a Gmail filter or by a person is not counted. Ingest uses the same
-  `in:inbox` query.
-- Whether mail is being archived before it reaches the inbox is unknown. Check the mailbox's
-  filters and All Mail volume.
+Rules were **not** changed, apart from the owner-requested no-reply fix. These are
+observations only.
 
-### Possibly wrong verdicts (observations only)
-- **Google no-reply senders are kept.** `noreply-apps-scripts-notifications@google.com` ×3,
-  `workspace-noreply@google.com` and `payments-noreply@google.com` stay in KEPT. The no-reply
-  rule matches only an address that **starts** with `noreply@` / `no-reply@`, so `…-noreply@`
-  and `noreply-…@` are missed.
-- **Supplier bulk mail is kept.** Five "PROMOTIONS + UPDATED INVENTORY" mailings from
-  `daniel@goldendesignsinc.com`, 2 from `service@wizzisaunas.com`, 1 from `ziv@dream-pod.com`
-  (MAP pricing) and 5 from `tadams@bathingbrands.com` all stay in KEPT.
-  - They carry no List-Unsubscribe header or Promotions label that the rules saw.
-  - `tadams` is exempt because we replied once, so every future promotion from that address
-    will be kept.
-  - About 13 of the 30 kept messages are supplier marketing.
-- **Actionable supplier finance and logistics mail is demoted.**
-  - `no-reply@bathingbrands.com` "ACH Payment Returned to Bathing Brands", supplier invoices ×3
-    and account notices ×2 are all demoted, on the `noreply` rule.
-  - `customerservice@bathingbrands.com` shipping notices ×2 are demoted, on `list_unsubscribe`
-    and `precedence`.
-  - None are customers, but a returned payment needs a human.
-- **Outreach is kept.** `sender2@example.com` "Blog Post Inquiry" (likely link-building) and
-  `sender4@example.com` "Exclusive opportunity" (exempt) stay in KEPT.
-- **A real customer arrives through Shopify.** `mailer@shopify.com` "New customer message" is
-  correctly kept.
-  - The customer's own address is inside the Shopify relay, so ingest would store
-    `mailer@shopify.com` as the customer handle.
-  - Its Reply-To is not read.
-- **No apparent customer is in DEMOTED,** judging by sender and subject; bodies weren't read.
-  Apparent customers in KEPT include the Finnmark and delivery-confirmation threads.
-- **The output truncates long addresses at 34 characters,** so `noreply-apps-scripts-notifications@…`
-  runs into its subject. Formatting only.
+### Population
+- **284 is below the owner's 300–600 estimate.**
+- Possible causes: mail routed to other mailboxes or a Google Group instead of support@, trash
+  emptied inside the window, or the estimate itself. Not investigated.
 
-### Script vs ingest
-`prove/triage.mjs` still carries its own copy of the rules; `src/lib/triage.ts` is the source
-of truth.
-- For this run, the copy's verdicts equal the source rules: `markedSpam` and `markedReal` were
-  empty, and the signal codes are the same.
-- They are not proven identical by running both on the same messages.
-- Importing the source rules into the script is still awaiting owner approval.
+### What drives demotion
+- 187 of 245 demoted messages carry Gmail's own `SPAM` label, and 126 are demoted on that alone.
+- 58 were demoted by our rules without Gmail spam.
+- 45 carry `noreply`. 21 of those are caught only by the widened pattern: Apps Script failure
+  notices ×18, plus `workspace-noreply`, `payments-noreply` and `googlebase-noreply`.
+- No address containing "bounce", "postmaster" or "mailer-daemon" was matched, so the broader
+  match produced no false positives in this sample.
+
+### Demoted verdicts that may be wrong (observations only)
+- **`verified.customer@example.com` "Track A Shipment – Priority1 for A Customer"** is demoted on
+  `gmail_spam` only.
+  - `customer.alt@example.com` (same local part) is an exempt customer in KEPT.
+  - It could be a real customer writing from a second address, or an impersonation.
+  - The exemption matches exact addresses only.
+- **Customer-shaped subjects demoted on Gmail spam alone:**
+  - `admin@refund-desk.example` "Refund Request – Order #467740987". The order format
+    differs from InHouse's `#INH…`.
+  - `admin@alkling.com` "Problem With My Recent Order" (also `list_unsubscribe` and
+    `precedence`).
+  - `sender3@example.com` "Hi please is this Inhousewellness".
+  - All three look like scams or outreach, but the subjects are what a customer would write.
+- **Account and operations mail for a human, not a customer:**
+  - `no-reply@accounts.google.com` "Critical security alert" ×2.
+  - `workspace-noreply@google.com` "Possible unresolved security risks".
+  - `payments-noreply@google.com` Workspace invoice.
+  - `googlebase-noreply@google.com` "New product image requirements" (Merchant Center).
+  - `omri@bbdetector.com` "Responsible Disclosure of a Subdomain Takeover issue" (Gmail spam;
+    possibly a real security report).
+- **Supplier finance and logistics are demoted:**
+  - `no-reply@bathingbrands.com` "ACH Payment Returned", invoices ×3 and account notices ×3.
+  - `customerservice@bathingbrands.com` shipping notices ×3. These may be needed to answer
+    "where is my order".
+- **`testflight_no_reply@email.apple.com` is not matched by `NOREPLY`** (underscore variant).
+  It's demoted only because Gmail marked it spam.
+
+### Kept verdicts that may be wrong (observations only)
+- **Supplier marketing:** `daniel@goldendesignsinc.com` inventory mailings ×5,
+  `service@wizzisaunas.com` ×2, `ziv@dream-pod.com` MAP pricing, and `tadams@bathingbrands.com`
+  promotions ×5 (exempt, because we replied once).
+- **Cold outreach and newsletters:** `sender7@henrytobin.com`,
+  `kristen@sender8.co`, `sender1@example.com`, `sender2@example.com`,
+  `sarah@sender9.com`, `hector@sender10.com`, `m.johnson@sender11.org`,
+  `sender6@example.com`, and `sender4@example.com` ×2 (exempt).
+- **A service notice:** `boomerang@baydin.com` "Message Credits Will Be Refilled".
+- **Probably correct:**
+  - Apparent customers: `ackerp81` ×4, `gcolon71` ×2, `karellbelle1`, `amachleit`,
+    `customer.alt@example.com`.
+  - `mailer@shopify.com`, a Shopify-relayed customer message.
+  - Possible trade partner: `sofia@saunamo.pt`.
+
+### Output format
+Two subjects contain `" | "` ("Guest Post Placements — DR 60–82 | Dofollow…", "Trustpilot ★5 |
+Google ★5 | …"). A line with more than four fields is ambiguous to parse. Reason codes are
+always the last field.
+
+---
+
+## Gmail ingest reads only `in:inbox` (same bias as the prove script)
+
+`src/ingest/gmail.ts` lists `in:inbox -in:chats newer_than:30d`. Two consequences:
+- Customer mail that a Gmail filter archives or labels away never reaches the console queue.
+- Nor does mail Gmail files as spam, such as the possible customer `verified.customer@example.com` above.
+
+Not changed this round. It needs an owner decision on which population the queue should read.
 
 ---
 

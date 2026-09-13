@@ -5,6 +5,53 @@ still unproven.
 
 ---
 
+## Round 5 — prove the filter against the real stream (2026-09-13, branch `claude/inh-round-5`, cut from `claude/inh-round-4`)
+
+Nothing was deployed, merged, pushed, or PR'd. Both changes were done test-first.
+
+### What changed
+1. **`61f703f` — no-reply rule.** `NOREPLY` matches anywhere in the local part, never the
+   domain. `prove/triage.mjs` carries an identical copy, checked by a parity test. No other
+   triage rule changed.
+2. **`08a0474` — `prove/triage.mjs` sampling.**
+   - **Query:** `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats`, with
+     `includeSpamTrash=true`.
+   - **Paging:** both lists are paged to the end. The received list had been one 400-message
+     page; the sent list behind the exemption set had been capped at 200. That second cap was
+     also an input-completeness fix; the exemption rule is unchanged.
+   - `messages.get` runs 8 at a time.
+   - **Output:** TOTAL and QUERY first, then `date | sender | subject(50) [| reasons]`.
+
+### Failing first, then passing
+- **No-reply rule:** 9 new tests, 5 failing first. The 4 in-the-middle shapes (`no-reply-calendar@`,
+  `notifications-noreply@`, `noreply-apps-scripts-notifications@`, `workspace-noreply@`) weren't
+  flagged, and the parity check failed.
+  - The 4 false-positive guards (`sarah.kreplin@`, `repairs@`, `replyguy.jones@`, `noreply` in
+    the domain) passed on the anchored rule and are proven by breaks.
+  - After: 14/14 triage tests.
+- **Sampling:** the fake Gmail now models a mailbox with inbox, archived, filtered, spam,
+  trash, sent, draft, chat and out-of-window mail. It uses 2-message pages, and the exemption
+  lives on page 2 of sent mail.
+  - Before: 2 tests failed. On that mailbox the old script counted 1 of 6 messages and 2 exempt
+    senders, missing the page-2 one. The truncation test passed vacuously, so a subject longer
+    than 50 characters was added.
+  - After: 4/4.
+- **Breaks:** no-reply 7, sampling 7 = **14 caught**. The unmodified copies passed 128/128,
+  then 129/129.
+- **Totals:** 129 tests, 129 pass, 0 fail. Check and build are clean.
+
+### Real run (support@, 30 days)
+- `TOTAL: 284 messages, 39 kept, 245 demoted`, in 10.6 seconds.
+- 47 exempt senders from 147 sent messages.
+- The output was scanned for key material: none.
+- Round-4 conclusions are withdrawn. Findings are in HANDOFF.
+
+### Still unproven
+The same as round 4. Also: whether 284 is the whole stream, compared with the 300–600
+estimate.
+
+---
+
 ## Round 4 — real data (2026-09-13, branch `claude/inh-round-4`, cut from `claude/inh-round-3`)
 
 Nothing was deployed, merged, pushed, or PR'd. Every change was done test-first.

@@ -113,6 +113,15 @@ It only demotes, and every demotion carries its reason codes through to the UI.
   - Senders in `markedSpam` are always demoted. Senders in `markedReal` and `everRepliedTo` are
     never demoted.
   - Gmail's `CATEGORY_UPDATES` deliberately contributes no signal.
+  - The no-reply signal (`NOREPLY`) matches its pattern **anywhere in the local part**, never
+    the domain. `no-reply-calendar@` and `notifications-noreply@` both match.
+    `tests/triage.test.mjs` also pins non-matches for names containing "rep" or "reply".
+- **Rules change only after the owner reads real output from the full received stream.**
+  - `prove/triage.mjs` samples
+    `in:anywhere newer_than:<days>d -in:sent -in:drafts -in:chats`, with
+    `includeSpamTrash=true`.
+  - Every list is paged to the end, including the sent mail that builds the exemption set.
+  - Never tune a rule against an `in:inbox` sample: that's the residue, not the stream.
 - **Gap:** nothing calls `classify()` yet.
   - `thread.triage_score`, `triage_signals`, `sender_rule` and `known_sender` are never written.
     Only `rescueThread` writes `triage` and `triage_by`.
@@ -122,7 +131,8 @@ It only demotes, and every demotion carries its reason codes through to the UI.
     Ingest must not overwrite a triage verdict a human set (`triage_by` not null). Today
     `syncThread` never writes `triage*`.
 - `prove/triage.mjs` holds a hand-copied duplicate of the rules. It has already drifted (no
-  `markedSpam` or `markedReal`). `src/lib/triage.ts` is the source of truth.
+  `markedSpam` or `markedReal`). `src/lib/triage.ts` is the source of truth. A parity test keeps
+  the `NOREPLY` pattern identical in both.
 
 ### 6. Response time is business minutes only
 Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
