@@ -68,7 +68,11 @@ function classify(msg, everRepliedTo) {
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 async function gm(token, path, params = {}) {
   const url = new URL(GMAIL + path);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  // Arrays are sent as repeated parameters. Gmail reads metadataHeaders=From,Subject
+  // as a single header name and returns no headers at all.
+  for (const [k, v] of Object.entries(params)) {
+    for (const item of [].concat(v)) url.searchParams.append(k, item);
+  }
   const res = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
   if (!res.ok) fail('Gmail ' + path + ' -> ' + res.status + ': ' + (await res.text()));
   return res.json();
@@ -83,7 +87,7 @@ const sentList = await gm(token, 'messages', { q: 'in:sent newer_than:180d', max
 const everRepliedTo = new Set();
 for (const m of sentList.messages ?? []) {
   const full = await gm(token, 'messages/' + m.id, { format: 'metadata', metadataHeaders: 'To' });
-  const to = full.payload.headers.find((x) => x.name.toLowerCase() === 'to')?.value ?? '';
+  const to = (full.payload?.headers ?? []).find((x) => x.name.toLowerCase() === 'to')?.value ?? '';
   for (const part of to.split(',')) if (part.trim()) everRepliedTo.add(emailOf(part));
 }
 
@@ -101,10 +105,10 @@ for (const stub of ids) {
     metadataHeaders: [
       'From', 'Subject', 'List-Unsubscribe', 'List-Id', 'Precedence',
       'Auto-Submitted', 'X-Campaign-Id', 'X-Mailer',
-    ].join(','),
+    ],
   });
   const headers = {};
-  for (const h of full.payload.headers) headers[h.name.toLowerCase()] = h.value;
+  for (const h of full.payload?.headers ?? []) headers[h.name.toLowerCase()] = h.value;
 
   const msg = {
     from: headers.from ?? '',

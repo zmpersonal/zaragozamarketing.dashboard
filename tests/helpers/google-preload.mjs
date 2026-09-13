@@ -42,7 +42,14 @@ globalThis.fetch = async (input, init) => {
   if (path.startsWith('messages/')) {
     const id = path.slice('messages/'.length);
     const m = inbox[id] ?? sent[id];
-    return m ? json({ id, labelIds: m.labelIds, internalDate: String(m.at), payload: { headers: m.headers } }) : json({}, 404);
+    if (!m) return json({}, 404);
+    // Real Gmail (verified against support@, round 4): with format=metadata,
+    // metadataHeaders must be repeated once per header name. A value is matched
+    // as one header name, so "From,Subject" matches nothing, and a payload with
+    // no matching headers has no `headers` key at all.
+    const wanted = url.searchParams.getAll('metadataHeaders').map((n) => n.toLowerCase());
+    const headers = wanted.length ? m.headers.filter((x) => wanted.includes(x.name.toLowerCase())) : m.headers;
+    return json({ id, labelIds: m.labelIds, internalDate: String(m.at), payload: headers.length ? { headers } : {} });
   }
   if (path === 'threads') return json({ threads: Object.keys(threads).map((id) => ({ id })) });
   if (path.startsWith('threads/')) return json(threads[path.slice('threads/'.length)] ?? {});
