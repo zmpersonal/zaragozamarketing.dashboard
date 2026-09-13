@@ -80,6 +80,12 @@ for (const from of [
   'LinkedIn <notifications-noreply@linkedin.com>',
   'Apps Script <noreply-apps-scripts-notifications@google.com>',
   'Google Workspace <workspace-noreply@google.com>',
+  // Separators between the words: hyphen, underscore, dot, or nothing (round 6).
+  'TestFlight <testflight_no_reply@email.apple.com>',
+  'Store <no.reply@shop.example>',
+  'Billing <do_not_reply@billing.example>',
+  'Alerts <do.not.reply@alerts.example>',
+  'Ops <mailer_daemon@mx.example>',
 ]) {
   test(`no-reply pattern inside the local part is demoted on noreply: ${from}`, () => {
     const v = classify(msg({ from, subject: 'Notification' }), noExemptions());
@@ -92,6 +98,7 @@ for (const from of [
   'Sarah Kreplin <sarah.kreplin@example.com>',       // "rep" inside a real surname
   'Sauna Repairs <repairs@saunarepair.example>',   // "rep" as a word
   'Reply Guy <replyguy.jones@example.com>',          // "reply" without "no"
+  'Noah Replyman <noah.replyman@example.com>',       // "no" and "reply" apart, more than one separator
 ]) {
   test(`a real person whose address merely contains "rep"/"reply" is NOT flagged: ${from}`, () => {
     const v = classify(msg({ from }), noExemptions());

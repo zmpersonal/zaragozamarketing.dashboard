@@ -34,7 +34,7 @@ function fail(msg) {
 
 // --- the same rules the worker uses, inlined so this runs with no build ---
 // Must equal NOREPLY in src/lib/triage.ts (tests/triage.test.mjs checks).
-const NOREPLY = /(no-?reply|do-?not-?reply|donotreply|bounce|mailer-daemon|postmaster)/i;
+const NOREPLY = /(no[-_.]?reply|do[-_.]?not[-_.]?reply|bounce|mailer[-_.]?daemon|postmaster)/i;
 const emailOf = (from) => (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
 
 function classify(msg, everRepliedTo) {

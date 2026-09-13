@@ -38,8 +38,12 @@ export interface Exemptions {
   markedSpam: Set<string>;
 }
 
-/** Automated-sender words, matched anywhere in the local part (never the domain). */
-export const NOREPLY = /(no-?reply|do-?not-?reply|donotreply|bounce|mailer-daemon|postmaster)/i;
+/**
+ * Automated-sender words, matched anywhere in the local part (never the domain).
+ * Multi-word forms allow a hyphen, underscore, dot, or nothing between words:
+ * noreply, no-reply, no_reply, no.reply, do_not_reply, mailer-daemon.
+ */
+export const NOREPLY = /(no[-_.]?reply|do[-_.]?not[-_.]?reply|bounce|mailer[-_.]?daemon|postmaster)/i;
 
 export const emailOf = (from: string) =>
   (from.match(/<([^>]+)>/)?.[1] ?? from).trim().toLowerCase();
