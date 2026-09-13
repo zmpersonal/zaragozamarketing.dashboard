@@ -68,11 +68,14 @@ CREATE TABLE IF NOT EXISTS thread (
 
   is_automated    INTEGER NOT NULL DEFAULT 0,  -- answered by chat AI, not a human
 
-  -- triage: nothing is ever hidden, only demoted below the fold
+  -- triage: three tiers, and nothing is ever hidden in any of them.
   triage          TEXT NOT NULL DEFAULT 'customer',
-                  -- 'customer' | 'bulk' | 'not_customer' | 'spam'
-  triage_score    INTEGER NOT NULL DEFAULT 0,
-  triage_signals  TEXT,                    -- JSON array of reason codes
+                  -- 'customer'  needs a reply
+                  -- 'bulk'      probably not a customer (structural bulk signals)
+                  -- 'spam'      Gmail's SPAM label or an agent's spam call. Its own
+                  --             tier, never a heavier bulk signal; shown and scannable.
+  triage_score    INTEGER NOT NULL DEFAULT 0,  -- bulk score only; spam adds nothing
+  triage_signals  TEXT,                    -- JSON [{code, why}] reasons, carried to the UI
   triage_by       TEXT,                    -- agent email if a human set it
 
   -- response clock, measured in BUSINESS minutes (America/Chicago, Mon-Fri 8-5)

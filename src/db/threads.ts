@@ -49,6 +49,8 @@ export interface ThreadObservation {
   newest_outbound_at: number | null;
   timeline: Observed[];
   is_automated?: 0 | 1;
+  /** Classifier verdict. Written only while no human has set triage (triage_by IS NULL). */
+  triage?: { tier: 'customer' | 'bulk' | 'spam'; score: number; signals: { code: string; why: string }[] };
 }
 
 export type SyncResult = 'inserted' | 'updated' | 'reopened' | 'unblocked' | 'skipped';
@@ -65,13 +67,14 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
       INSERT INTO thread (
         id, source_id, brand_id, channel, subject, customer_name, customer_handle,
         preview, status, is_automated, conversation_started_at, last_inbound_at,
-        last_outbound_at, awaiting_since
-      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+        last_outbound_at, awaiting_since, triage, triage_score, triage_signals
+      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14, COALESCE(?15, 'customer'), COALESCE(?16, 0), ?17)
       ON CONFLICT(id) DO NOTHING
     `).bind(
       o.id, o.source_id, o.brand_id, o.channel, o.subject, o.customer_name, o.customer_handle,
       o.preview, state.status, o.is_automated ?? 0, o.conversation_started_at,
       o.newest_inbound_at ?? o.conversation_started_at, o.newest_outbound_at, state.awaiting_since,
+      o.triage?.tier ?? null, o.triage?.score ?? null, o.triage ? JSON.stringify(o.triage.signals) : null,
     ).run();
     if (res.meta.changes === 0) return 'skipped';
     await recordWaits(db, o.id, null, o.timeline, now);
@@ -95,7 +98,11 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
       awaiting_since   = ?10,
       -- leaving 'blocked' because the customer chased: no blocked age, but
       -- blocked_on / blocked_note stay as context for the agent
-      blocked_since    = CASE WHEN ?15 THEN NULL ELSE blocked_since END
+      blocked_since    = CASE WHEN ?15 THEN NULL ELSE blocked_since END,
+      -- the classifier never overrides a human's triage call
+      triage           = CASE WHEN triage_by IS NULL AND ?16 IS NOT NULL THEN ?16 ELSE triage END,
+      triage_score     = CASE WHEN triage_by IS NULL AND ?16 IS NOT NULL THEN ?17 ELSE triage_score END,
+      triage_signals   = CASE WHEN triage_by IS NULL AND ?16 IS NOT NULL THEN ?18 ELSE triage_signals END
     WHERE id = ?1
       AND status = ?11
       AND awaiting_since IS ?12
@@ -107,6 +114,7 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
     state.status, state.awaiting_since,
     existing.status, existing.awaiting_since, existing.last_inbound_at, existing.last_outbound_at,
     state.unblocked ? 1 : 0,
+    o.triage?.tier ?? null, o.triage?.score ?? null, o.triage ? JSON.stringify(o.triage.signals) : null,
   ).run();
 
   if (res.meta.changes === 0) return 'skipped';
