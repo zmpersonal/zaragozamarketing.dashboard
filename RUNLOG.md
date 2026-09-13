@@ -5,6 +5,90 @@ still unproven.
 
 ---
 
+## Round 3 — correctness, part two (2026-09-13, branch `claude/inh-round-3`, cut from `claude/inh-round-2`)
+
+Nothing was deployed, merged, pushed, or PR'd. Every item was done test-first: write the test,
+watch it fail, fix, watch it pass.
+
+### What changed
+1. **Rename, `b8f1570`.** `first_inbound_at` → `conversation_started_at` across the schema,
+   `src`, tests, UI, CLAUDE.md and the README. The meaning is unchanged. RUNLOG and HANDOFF keep
+   the old name as history.
+2. **Auth, `b272d2a`.** Added tests for the authenticated routes, using real RS256 Access tokens
+   (`tests/helpers/access.mjs`). Fixed four holes in `authenticate()`, described below.
+3. **Logged contact counts as a reply, `9458969`.**
+   - `replied` and `called` actions stamp `last_outbound_at`, clear `awaiting_since`, and move a
+     waiting thread to answered.
+   - Other kinds no longer stamp `last_outbound_at`.
+   - `resolveState()` counts the stored `last_outbound_at` as an outbound event, so ingest can
+     never resurrect `waiting` after a logged contact.
+4. **`blocked_since`, `18abc1f`.** Set on the move to blocked, kept while blocked, cleared on
+   leaving. The queue shows waiting threads, then blocked threads by `blocked_since`. The UI
+   shows "blocked 6d".
+5. **Per-thread isolation, `b52b3e3`.** Gmail's `try/catch` now wraps each thread instead of the
+   whole mailbox.
+6. **Quo polling, `38d13d5`.**
+   - Reads `/v1/messages` and `/v1/calls` created after a per-source `sync_cursor`, for
+     conversations with activity since that cursor.
+   - The cursor advances only when every conversation synced, and failures are isolated per
+     conversation.
+   - The old code called unversioned `/conversations` with the 2026-03-30 header.
+7. **Quo webhook, `ad94a0b`.** Replaced the legacy `openphone-signature` verifier with Standard
+   Webhooks, the only scheme in Quo's 2026-03-30 versioned docs. It fails closed, and the legacy
+   header gets a 401.
+8. **Docs.** CLAUDE.md invariants, plus this entry and HANDOFF.
+
+### Failing first, then passing
+
+| Item | Before | After |
+|---|---|---|
+| 4 rename | 2 tests, 0 pass: column missing; 9 files still named the old column | 2/2 |
+| 6 auth | 13 tests, 9 pass, **4 fail**: no-`exp` token → 200; `aud` substring `x-<aud>-y` → 200; malformed token → `InvalidCharacterError` (500); token with no email → 200. The 5 requested cases passed on the old code and were proven by breaks. | 13/13 |
+| 1 contact | 6 tests, **0 pass**: after a logged call, `awaiting_since` still set; a note stamped `last_outbound_at`; the sync flipped the thread back to `waiting` | 6/6, +1 waiting-coercion test and 3 pure `resolveState` tests |
+| 5 blocked | 3 tests, 1 pass (vacuously), **2 fail**: `blocked_since` not set; column missing | 3/3 |
+| 3 isolation | 2 tests, **0 pass**: the thread after the malformed one was never ingested (TypeError shape and NOT NULL shape) | 2/2 |
+| 2 Quo | 9 tests, 1 pass (vacuously), **8 fail**: interleaved inbound not observed (`last_inbound_at` 09:10, expected 09:30); held clock after a reply; start taken from latest activity; no cursor; answered call counted as waiting; failure handling | 10/10 (+1 undelivered-text test); 2 round-2 Quo tests ported |
+| webhook | 14 tests, 10 pass (vacuously), **4 fail**: 3 valid Standard Webhooks deliveries → 401; legacy header → 200 | 14/14 |
+
+- **Totals:** 85 tests, 85 pass, 0 fail. `npm run check` and `npm run build` are clean.
+- **Deliberate breaks, run in scratch copies (the repo was never modified):** 60 caught, by
+  item:
+  - auth: 15
+  - contact: 9
+  - blocked: 7
+  - isolation: 4
+  - Quo: 11
+  - webhook: 14
+- **Corrections along the way:**
+  - One contact break was a no-op and was redone.
+  - One contact break wasn't reachable through the route; it's now pinned by a pure unit test.
+  - One webhook break was aimed at the wrong test. The valid-signature tests caught it, and a
+    body-binding break correctly aimed was caught too.
+  - The race test's SQL-text match was loosened after it silently stopped intercepting.
+- **Harness mistakes caught before they counted:**
+  - `undefined` claim defaults meant the tokens still carried `exp` and email.
+  - A fractional expected timestamp could never match.
+  - The Quo failure test processed the failing conversation last, so it didn't test isolation.
+    It was reordered.
+- **UI:** checked in the browser with no console errors. "blocked 6d" and "blocked 17h" render
+  below the waiting rows.
+
+### Research (Quo docs)
+- The dated API 2026-03-30 lists only users and webhooks today. Conversations and messages are
+  "in development", and v1 "remains fully supported".
+- v1 `/messages` requires `phoneNumberId` and `participants`. `/calls` takes one participant.
+  `/conversations` returns newest activity first.
+- The 2026-03-30 webhooks use Standard Webhooks, and the changelog calls that API open beta.
+- Details and what remains unproven are in HANDOFF.
+
+### Still unproven
+- A real Quo webhook delivery (either scheme).
+- Quo v1 behaviour: array parameter encoding, sort order, rate limit.
+- D1 itself.
+- Gmail, Quo and OAuth against real accounts.
+
+---
+
 ## Round 2 — correctness (2026-09-13, branch `claude/inh-round-2`, cut from `claude/inh-round-1`)
 
 Nothing was deployed, merged, pushed, or PR'd. The repo now lives at

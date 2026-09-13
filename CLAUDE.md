@@ -51,8 +51,7 @@ The response clock does **not** run from it (see invariant 4).
   it either. Tests: `tests/awaiting-since.test.mjs`, `tests/rescue.test.mjs`.
 - What "began" means per source:
   - **Gmail:** the thread's first message, which can be ours.
-  - **Quo:** the latest activity when the poller first saw the conversation, because the API
-    doesn't expose history.
+  - **Quo:** the conversation's `createdAt`.
   - **Chat:** the provider's `startedAt`.
 
 ### 4. The response clock runs from `awaiting_since`
@@ -66,8 +65,17 @@ never from `conversation_started_at`. The rules live once, in `src/lib/thread-st
     the thread.
 - **Closed with nothing new:** stays `closed`, with `awaiting_since` NULL. Closing through
   `POST /api/actions` also sets it NULL.
-- **Held until we reply:** once set, `awaiting_since` holds until an outbound is seen after it.
-  A reopened thread can't slide back to a pre-close message on the next sync.
+- **Logged contact is a reply:** an action of kind `replied` or `called` (`POST /api/actions`)
+  sets `last_outbound_at` to now, clears `awaiting_since`, and moves a `waiting` thread to
+  `answered`. That includes a call logged with "still needs a reply". Other kinds never touch
+  `last_outbound_at`.
+- **Ingest never resurrects `waiting` while `last_outbound_at` is newer than the newest inbound
+  message.** `resolveState()` counts the stored `last_outbound_at` as an outbound event, so a call
+  the provider never saw still counts as a reply. Tests: `tests/contact-actions.test.mjs` (the
+  round trip through the route and a real sync) and `tests/thread-state.test.mjs`.
+- **Held until we reply:** once set, `awaiting_since` holds until an outbound is seen after it,
+  including a logged contact. A reopened thread can't slide back to a pre-close message on the
+  next sync.
 - **Rescue:** rescuing a demoted message (`rescueThread`, `POST /api/threads/:id/rescue`) changes
   `triage` and `triage_by` and logs a `rescued` action, **only**. It never writes
   `conversation_started_at` or `awaiting_since`, so the clock runs from when the customer actually
@@ -113,19 +121,39 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
 
 ### 7. Ingest never overwrites a status a human set
 - **`blocked`** always stays blocked. The clock (`awaiting_since`) still runs.
+  - `blocked_since` is set by `POST /api/actions` on the move to `blocked`, kept while the thread
+    stays blocked (re-saving doesn't reset it), and cleared when it leaves. Ingest never writes
+    it.
+  - `/api/queue` lists waiting threads first (by `awaiting_since`), then blocked threads (by
+    `blocked_since`), with priority ordering within each group. The UI shows "blocked 6d".
+    Tests: `tests/blocked-since.test.mjs`.
 - **`closed`** stays closed unless a new inbound message arrives, which reopens it (invariant 4).
   That is the only automatic change to a human-set status.
 - `answered` and `waiting` are **not** protected. Ingest recomputes them from the timeline.
 - **Enforced today:** `resolveState()` applies these rules. `syncThread()`'s UPDATE is also
-  conditional on the status, `awaiting_since` and `last_inbound_at` it read. If an agent changes
-  the thread mid-sync, the write is skipped and the next cron run resolves again.
+  conditional on the status, `awaiting_since`, `last_inbound_at` and `last_outbound_at` it read.
+  If an agent changes the thread mid-sync, the write is skipped and the next cron run resolves
+  again.
   - Tests: `tests/awaiting-since.test.mjs` (guards) and `tests/sync-thread.test.mjs` (the race).
 - Any new ingest source must go through `syncThread()`.
+- **One bad item never stops a source.**
+  - Gmail wraps each thread, and Quo wraps each conversation, in its own `try/catch`. A failure
+    is logged with the item's id and skipped, and the rest of the batch syncs. Tests:
+    `tests/ingest-isolation.test.mjs`, `tests/quo-ingest.test.mjs`.
+- **Every Quo inbound is observed.**
+  - Quo polling reads individual messages and calls created after `source.sync_cursor`, never
+    just a conversation's latest activity.
+  - The cursor advances only when every conversation synced.
+  - The webhook is the fast path; polling is the backstop.
 
 ### 8. Agents are identified individually
 Never by a shared or rotating login.
-- **Enforced today:** `authenticate()` in `src/index.ts` takes the email from the signed
-  Cloudflare Access JWT, and `action.actor` records that email.
+- **Enforced today:** `authenticate()` in `src/index.ts` takes the email from a Cloudflare Access
+  JWT, and `action.actor` records that email.
+  - The JWT must carry a valid RS256 signature from the team's published certs, a numeric `exp`
+    in the future, an `aud` that exactly matches `ACCESS_AUD` (string or array), and an email.
+  - Anything malformed is a 401, never a 500.
+  - Tests: `tests/auth.test.mjs`, which mints real tokens.
 - Role is `owner` if the email is in `OWNERS`, otherwise `agent`.
 - The Access policy must list individual people. Don't allow a shared mailbox (e.g. a generic
   `agent@` or `support@` login) as a console user.
@@ -133,10 +161,14 @@ Never by a shared or rotating login.
   thread or to-do. See HANDOFF.
 
 ### 9. Public endpoints trust nothing unsigned
-`/hooks/quo` verifies Quo's `openphone-signature` HMAC before reading the body
-(`src/lib/quo-signature.ts`).
-- It enforces a 5-minute replay window.
-- It returns 401 on any failure, and also when `QUO_WEBHOOK_SECRET` is unset (fail closed).
+`/hooks/quo` verifies a Standard Webhooks signature, per Quo's versioned docs for API 2026-03-30,
+over the raw body before trusting it (`src/lib/quo-signature.ts`).
+- **Headers:** `webhook-id`, `webhook-timestamp` (seconds), and `webhook-signature` (`v1,<b64>`
+  entries).
+- **Signature:** HMAC-SHA256 over `id.timestamp.body`, with the `whsec_` secret as the key.
+- **Replay window:** 5 minutes, in either direction.
+- **Returns 401** on any failure: the legacy `openphone-signature` header, a re-serialized body,
+  a millisecond timestamp, and an unset or non-base64 secret (fail closed).
 - Tests: `tests/quo-webhook.test.mjs`.
 - Any new public webhook needs the same: verify first, fail closed, and test both a valid and an
   invalid signature.
@@ -146,17 +178,18 @@ Never by a shared or rotating login.
 ```
 src/index.ts              Worker: auth (Access JWT), /api routes, /hooks/quo, cron → ingest
 src/ingest/gmail.ts       Gmail threads → timeline → syncThread (customer = first inbound sender)
-src/ingest/quo.ts         Quo conversations (latest activity only) → syncThread
+src/ingest/quo.ts         Quo v1 messages + calls since source.sync_cursor → syncThread
 src/ingest/chat.ts        provider-agnostic chat → syncThread (not routed yet)
 src/db/threads.ts         syncThread (conditional write), rescueThread
 src/lib/thread-state.ts   status / awaiting_since / reopen rules, responseMinutes (pure)
 src/lib/triage.ts         demotion rules (pure)
 src/lib/clock.ts          business-minutes clock (pure)
-src/lib/quo-signature.ts  Quo webhook HMAC verification
+src/lib/quo-signature.ts  Quo webhook verification (Standard Webhooks)
 schema.sql                D1 schema + brand seed
 public/index.html         UI, mock data until USE_API = true
 prove/*.mjs               run-by-hand source proofs; need real credentials
-tests/*.test.mjs          node:test suites; tests/helpers has the D1 shim and fake Gmail
+tests/*.test.mjs          node:test suites; tests/helpers has the D1 shim, fake Gmail, fake
+                          Quo v1 API, and an Access JWT minter
 ```
 
 Source imports use explicit `.ts` extensions (`allowImportingTsExtensions`), so Node can load
