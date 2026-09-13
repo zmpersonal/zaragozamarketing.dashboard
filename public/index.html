@@ -133,7 +133,7 @@
            border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
   .row {
     display: grid;
-    grid-template-columns: 4px 62px minmax(0,1fr) 128px 92px;
+    grid-template-columns: 4px 96px minmax(0,1fr) 128px 92px;
     align-items: center;
     gap: 12px;
     background: var(--surface);
@@ -143,7 +143,7 @@
   .row[aria-selected="true"] { background: #e8f0f2; }
   .row:focus-visible { outline: 2px solid var(--plunge); outline-offset: -2px; }
   .row .edge { align-self: stretch; }
-  .row .age { font-size: 14px; font-weight: 600; padding: 11px 0; }
+  .row .age { font-size: 14px; font-weight: 600; padding: 11px 0; white-space: nowrap; }
   .row .body { min-width: 0; padding: 10px 0; }
   .row .subject {
     font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -220,7 +220,7 @@
     .rail { flex-direction: row; align-items: center; gap: 22px; padding: 12px 16px; }
     .rail nav { flex-direction: row; }
     .rail .heading, .rail .who { display: none; }
-    .row { grid-template-columns: 4px 52px minmax(0,1fr) 90px; }
+    .row { grid-template-columns: 4px 92px minmax(0,1fr) 90px; }
     .row .who { display: none; }
   }
   @media (prefers-reduced-motion: no-preference) {
@@ -306,7 +306,7 @@ const MOCK = {
     { id: 'gmail:2', brand_id: 'caliza', channel: 'email', subject: 'Invoice 2214 — wrong PO number',
       customer_name: 'Priya Raman', customer_handle: 'ap@…', status: 'blocked', blocked_on: 'owner',
       blocked_note: 'Needs Julian to confirm the revised PO before we reissue.',
-      assignee: 'agent@inhousewellness.com', conversation_started_at: h(19), awaiting_since: null, preview: 'Our AP system rejected it.' },
+      assignee: 'agent@inhousewellness.com', conversation_started_at: h(19), awaiting_since: null, blocked_since: h(17), preview: 'Our AP system rejected it.' },
     { id: 'chat:1', brand_id: 'inhouse', channel: 'chat', subject: 'Plunge chiller sizing',
       customer_name: 'Visitor', customer_handle: 'chat', status: 'waiting', assignee: null,
       conversation_started_at: h(7), awaiting_since: h(7), is_automated: 1, preview: 'Bot answered sizing, then they asked about 220v wiring.' },
@@ -319,7 +319,7 @@ const MOCK = {
     { id: 'quo:2', brand_id: 'caliza', channel: 'phone', subject: 'Text',
       customer_name: 'Rosa Lim', customer_handle: '+1 737 555 0198', status: 'blocked', blocked_on: 'shipping',
       blocked_note: 'Carrier claim filed, waiting on their inspection.',
-      assignee: null, conversation_started_at: h(63), awaiting_since: null, preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
+      assignee: null, conversation_started_at: h(63), awaiting_since: null, blocked_since: h(6 * 24), preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
   ],
   actions: {
     'gmail:2': [
@@ -359,10 +359,20 @@ const ageHours = (t) => (NOW() - t) / 3600;
 // not answered), never conversation_started_at. null = not waiting on us.
 // TODO: still wall-clock hours; must become business minutes (CLAUDE.md invariant 5).
 const waitHours = (t) => (t.awaiting_since == null ? null : ageHours(t.awaiting_since));
-const longestWaitingFirst = (a, b) =>
-  (a.awaiting_since ?? Infinity) === (b.awaiting_since ?? Infinity)
+
+// Blocked threads age from blocked_since: a different kind of waiting, not ageless.
+const isBlocked = (t) => t.status === 'blocked';
+const since = (t) => (isBlocked(t) ? t.blocked_since : t.awaiting_since);
+const ageText = (t) => isBlocked(t)
+  ? 'blocked' + (t.blocked_since == null ? '' : ' ' + ageLabel(t.blocked_since))
+  : (t.awaiting_since == null ? '—' : ageLabel(t.awaiting_since));
+
+// Same order as /api/queue: waiting group first, then blocked; oldest first in each.
+const queueOrder = (a, b) =>
+  (isBlocked(a) - isBlocked(b)) ||
+  ((since(a) ?? Infinity) === (since(b) ?? Infinity)
     ? a.conversation_started_at - b.conversation_started_at
-    : (a.awaiting_since ?? Infinity) < (b.awaiting_since ?? Infinity) ? -1 : 1;
+    : (since(a) ?? Infinity) < (since(b) ?? Infinity) ? -1 : 1);
 
 function ageLabel(t) {
   const hrs = ageHours(t);
@@ -387,7 +397,7 @@ function visibleThreads() {
   if (state.filter === 'unassigned') rows = rows.filter((t) => !t.assignee);
   if (state.filter === 'blocked') rows = rows.filter((t) => t.status === 'blocked');
   if (state.filter === 'overdue') rows = rows.filter((t) => waitHours(t) > 24);
-  return rows.sort(longestWaitingFirst);
+  return rows.sort(queueOrder);
 }
 
 // ---------------------------------------------------------------
@@ -465,14 +475,14 @@ function renderQueue() {
   }
 
   for (const t of rows) {
-    const hrs = waitHours(t) ?? 0;
+    const hrs = since(t) == null ? 0 : ageHours(since(t));
     const el = document.createElement('button');
     el.className = 'row';
     el.setAttribute('aria-selected', String(state.selected === t.id));
     el.innerHTML =
       '<span class="edge" style="background:' + heatColor(hrs) + '"></span>' +
       '<span class="age num" style="color:' + heatColor(hrs) + '">' +
-        (t.awaiting_since == null ? '—' : ageLabel(t.awaiting_since)) + '</span>' +
+        ageText(t) + '</span>' +
       '<span class="body">' +
         '<span class="subject">' + esc(t.subject) + '</span><br>' +
         '<span class="from">' + esc(t.customer_name ?? t.customer_handle ?? '') +

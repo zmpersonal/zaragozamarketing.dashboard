@@ -115,20 +115,27 @@ async function board(env: Env) {
 }
 
 /**
- * The queue. Longest-waiting first, measured from awaiting_since (the oldest
- * unanswered inbound), never conversation_started_at. Threads that are open but not
- * awaiting us (blocked, already answered) sort after.
+ * The queue, in two groups:
+ *   1. waiting: longest-waiting first, from awaiting_since (the oldest
+ *      unanswered inbound), never conversation_started_at.
+ *   2. blocked: below every waiting thread, longest-blocked first, from
+ *      blocked_since. Blocked is a different kind of waiting, not ageless.
+ * Priority orders within each group.
  */
 async function queue(env: Env, user: User, mine: boolean) {
   const sql = `
     SELECT t.id, t.brand_id, t.channel, t.subject, t.customer_name,
            t.customer_handle, t.preview, t.status, t.blocked_on, t.blocked_note,
            t.assignee, t.priority, t.conversation_started_at, t.last_inbound_at,
-           t.awaiting_since, t.is_automated
+           t.awaiting_since, t.blocked_since, t.is_automated
     FROM thread t
     WHERE t.status IN ('waiting','blocked')
       ${mine ? 'AND (t.assignee = ?1 OR t.assignee IS NULL)' : ''}
-    ORDER BY t.priority DESC, t.awaiting_since IS NULL, t.awaiting_since ASC, t.conversation_started_at ASC
+    ORDER BY t.status = 'blocked',
+             t.priority DESC,
+             CASE WHEN t.status = 'blocked' THEN t.blocked_since ELSE t.awaiting_since END IS NULL,
+             CASE WHEN t.status = 'blocked' THEN t.blocked_since ELSE t.awaiting_since END ASC,
+             t.conversation_started_at ASC
     LIMIT 200`;
   const stmt = mine
     ? env.DB.prepare(sql).bind(user.email)
@@ -227,6 +234,12 @@ export default {
                  END,
                  blocked_on   = CASE WHEN ?2 IS NULL THEN blocked_on ELSE ?3 END,
                  blocked_note = CASE WHEN ?2 IS NULL THEN blocked_note ELSE ?4 END,
+                 -- set on the move to blocked, kept while it stays blocked, cleared on leaving
+                 blocked_since = CASE
+                   WHEN ?2 IS NULL THEN blocked_since
+                   WHEN ?2 = 'blocked' THEN CASE WHEN status = 'blocked' THEN COALESCE(blocked_since, ?6) ELSE ?6 END
+                   ELSE NULL
+                 END,
                  assignee = COALESCE(assignee, ?5),
                  last_outbound_at = CASE WHEN ?7 THEN ?6 ELSE last_outbound_at END,
                  closed_at = CASE WHEN ?2 IS NULL THEN closed_at WHEN ?2 = 'closed' THEN ?6 ELSE NULL END,

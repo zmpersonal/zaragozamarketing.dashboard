@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS thread (
   blocked_on      TEXT,                    -- 'customer' | 'supplier' | 'refund'
                                            -- | 'shipping' | 'owner' | 'other'
   blocked_note    TEXT,
+  blocked_since   INTEGER,                 -- unix seconds the thread moved to 'blocked'.
+                                           -- Kept while it stays blocked, NULL otherwise.
+                                           -- Blocked threads age and sort by this.
 
   assignee        TEXT,                    -- agent email, null = unassigned
   priority        INTEGER NOT NULL DEFAULT 0,  -- 0 normal, 1 high, 2 urgent
