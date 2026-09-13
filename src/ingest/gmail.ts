@@ -6,6 +6,7 @@
  * message. That single rule is what makes the board honest.
  */
 import type { Env } from '../index.ts';
+import { emailOf } from '../lib/triage.ts';
 
 const GMAIL = 'https://gmail.googleapis.com/gmail/v1/users/me/';
 
@@ -52,8 +53,21 @@ export async function ingestGmail(env: Env) {
         const header = (m: any, name: string) =>
           m.payload.headers.find((h: any) => h.name.toLowerCase() === name)?.value ?? '';
 
-        const from = header(last, 'from');
-        const inbound = !from.toLowerCase().includes(src.address.toLowerCase());
+        // Outbound = Gmail's SENT label (set for every send from this mailbox,
+        // send-as aliases included) or an exact From match. Never a substring
+        // match: that let alias replies count as inbound.
+        const isInbound = (m: any) =>
+          !(m.labelIds ?? []).includes('SENT') &&
+          emailOf(header(m, 'from')) !== src.address.toLowerCase();
+
+        // The customer is whoever opened the conversation with us: the sender
+        // of the FIRST inbound message. Never the newest message, which may be
+        // our own reply or a colleague cc'd in later.
+        const firstIn = msgs.find(isInbound);
+        if (!firstIn) continue; // nothing inbound: not a customer conversation
+
+        const customerFrom = header(firstIn, 'from');
+        const inbound = isInbound(last);
         const firstAt = Math.floor(Number(msgs[0].internalDate) / 1000);
         const lastAt = Math.floor(Number(last.internalDate) / 1000);
 
@@ -66,6 +80,8 @@ export async function ingestGmail(env: Env) {
             last_inbound_at, last_outbound_at
           ) VALUES (?1,?2,?3,'email',?4,?5,?6,?7,?8,?9,?10,?11)
           ON CONFLICT(id) DO UPDATE SET
+            customer_name   = excluded.customer_name,
+            customer_handle = excluded.customer_handle,
             preview        = excluded.preview,
             last_inbound_at  = MAX(thread.last_inbound_at, excluded.last_inbound_at),
             last_outbound_at = MAX(COALESCE(thread.last_outbound_at,0), COALESCE(excluded.last_outbound_at,0)),
@@ -76,8 +92,8 @@ export async function ingestGmail(env: Env) {
         `).bind(
           `gmail:${t.id}`, src.id, src.brand_id,
           header(msgs[0], 'subject') || '(no subject)',
-          from.replace(/<.*/, '').replace(/"/g, '').trim(),
-          (from.match(/<(.+)>/)?.[1] ?? from).toLowerCase(),
+          customerFrom.replace(/<.*/, '').replace(/"/g, '').trim(),
+          emailOf(customerFrom),
           (t.snippet ?? '').slice(0, 200),
           inbound ? 'waiting' : 'answered',
           firstAt,
