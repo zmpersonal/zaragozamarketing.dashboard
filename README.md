@@ -120,70 +120,21 @@ produces a second measurement.
     through the same code as polling, so a thread updates in real time. Repeat deliveries are
     recognised by `webhook-id` and ignored. The hourly poll is the backstop and changes nothing
     the webhook already recorded.
-  - **Subscribe it in Quo** (a human step): `POST https://api.quo.com/webhooks` with header
-    `Quo-Api-Version: 2026-03-30`, the URL `https://<console host>/hooks/quo`, and the events
-    `message.received`, `message.delivered`, `message.undelivered`, `message.failed`,
-    `call.completed`, `call.missed`. Put the returned `whsec_…` secret in
-    `wrangler secret put QUO_WEBHOOK_SECRET`.
+  - It runs as its own Worker, `inhouse-ops-hooks`, because the console sits behind Cloudflare
+    Access, which can't exempt one path, and Quo can't sign in.
+  - Subscribing it in Quo is a human step: `RUNBOOK.md` §3.
 
 ## Setup
 
+**Deploying is `RUNBOOK.md`**: the ordered commands and dashboard steps, marked yours or Claude's,
+with what can't be undone. Locally:
+
 ```bash
 npm install
-npm run check && npm test && npm run build   # typecheck, tests, local dry-run bundle
-
-npx wrangler login
-# The database exists (id 4f562bdf-…, already in wrangler.toml). Load the schema:
-npx wrangler d1 execute inhouse-ops --file=./schema.sql --remote
-
-# The Worker has one secret:
-npx wrangler secret put QUO_WEBHOOK_SECRET      # whsec_... from POST https://api.quo.com/webhooks
-                                                 # with header Quo-Api-Version: 2026-03-30
-npx wrangler deploy
+npm run check && npm test && npm run build   # typecheck, tests, dry-run bundles of both Workers
 ```
 
-Ingest credentials go in **GitHub → Settings → Secrets and variables → Actions**, never in the
-Worker: `GOOGLE_SERVICE_ACCOUNT_JSON` (paste the key file's contents), `QUO_API_KEY`,
-`CLOUDFLARE_API_TOKEN` (a token scoped to D1 edit only), `CLOUDFLARE_ACCOUNT_ID`,
-`CLOUDFLARE_D1_DATABASE_ID`. Scheduled workflows only run from the default branch, so the
-workflow starts once this branch is merged to `main`. Run it once by hand from the Actions tab
-to check it goes green.
-
-**Deploying, running `d1 … --remote`, and setting secrets are human steps.** See CLAUDE.md
-invariant 1.
-
-After deploying:
-1. **Cloudflare Access.** In the Cloudflare dashboard, go to Zero Trust → Access and add a
-   self-hosted application over the Worker's hostname. Allow each person's individual email
-   (never a shared login). Copy the audience tag into `ACCESS_AUD` and the team name into
-   `ACCESS_TEAM`.
-2. **Register each mailbox and phone line as a source:**
-
-```sql
-INSERT INTO source (id, brand_id, channel, provider, address) VALUES
-  ('gmail:support@inhousewellness.com', 'inhouse', 'email', 'gmail', 'support@inhousewellness.com'),
-  ('quo:PNxxxxxxxx',                    'inhouse', 'phone', 'quo',   'PNxxxxxxxx');
-```
-
-3. **Seed verified customers and known senders** from files kept **outside the repo** (they
-   are customer contact data):
-
-```bash
-# sender_rule rows: the shape is in seeds/sender_rule.example.sql
-npx wrangler d1 execute inhouse-ops --file=~/Code/secrets/inhouse-ops-sender-rules.sql --remote
-
-# one-off: everyone we have ever written to becomes a known sender
-GOOGLE_SERVICE_ACCOUNT_FILE=~/Code/secrets/<key>.json \
-  node prove/backfill-known-senders.mjs support@inhousewellness.com \
-  --out ~/Code/secrets/inhouse-ops-known-senders.sql
-# drop our own colleagues (@inhousewellness.com); repeatable, safe to apply again
-node prove/apply-known-senders.mjs --in ~/Code/secrets/inhouse-ops-known-senders.sql \
-  --out ~/Code/secrets/inhouse-ops-known-senders.filtered.sql
-npx wrangler d1 execute inhouse-ops --file=~/Code/secrets/inhouse-ops-known-senders.filtered.sql --remote
-```
-
-Once a database has real rows, schema changes need `wrangler d1 migrations`, because
-`schema.sql` only creates tables that don't exist yet.
+Deploying, `wrangler d1 … --remote`, and setting secrets are human steps (CLAUDE.md invariant 1).
 
 ## The filter
 
@@ -244,17 +195,15 @@ GOOGLE_SERVICE_ACCOUNT_FILE=~/Code/secrets/<key>.json node prove/triage.mjs supp
 
 ## Looking at the UI now
 
-`public/index.html` runs standalone on mock data: open it in a browser, with no build step.
-
-Flip `USE_API = true` at the top of the script once D1 is seeded. Ages are still shown in
-wall-clock hours rather than business minutes (see HANDOFF).
+The UI only talks to the API; there's no mock data. To run it locally against fabricated data,
+use `wrangler dev` with a local D1 (`--local --persist-to <dir>`, schema plus a fabricated seed)
+and a dev-only entry that answers Cloudflare Access's certs with a test key. Round 11 did exactly
+that (HANDOFF, "Round 11 UI run"). Ages are still wall-clock hours, not business minutes.
 
 ## Not done yet
 
 - **Triage wiring, demoted section, rescue button** (see "The filter").
 - **Admin report.** `response` holds the data, but there's no report view yet.
-- **Webhook ingest.** `/hooks/quo` verifies deliveries but doesn't write them, and doesn't
-  deduplicate by `webhook-id` yet.
 - **Process stages.** The `stage` column has no vocabulary yet; it's waiting on the real list.
 - **Weekend confirmation.** The clock assumes Saturday and Sunday are fully closed.
 - **Chat.** No provider is connected; `src/ingest/chat.ts` normalises whatever we pick.

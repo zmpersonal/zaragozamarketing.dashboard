@@ -8,10 +8,16 @@ One internal console. The repo is named for where it's hosted: Zaragoza Marketin
 subdomain. InHouse Wellness (INH), THI and ZM are meant to become tabs in this same console,
 not separate projects. **V1 content is InHouse Wellness customer service only.**
 
-It runs in two places (round 9), both on free tiers:
-- **Cloudflare Worker, Workers Free** (`src/index.ts`): serves the static UI (`public/index.html`),
-  `/api/*` and the Quo webhook `/hooks/quo`, reading and writing D1 (`schema.sql`) through its
-  binding. It has no cron triggers and runs no ingest.
+It runs in three pieces (rounds 9–11), all on free tiers. The deploy steps are in `RUNBOOK.md`.
+- **Console Worker** `inhouse-ops` (`src/index.ts`, `wrangler.toml`), Workers Free, behind
+  Cloudflare Access at Worker level. It serves the static UI (`public/index.html`, real API only,
+  no mock data) and `/api/*`, reading and writing D1 (`schema.sql`) through its binding. No cron,
+  no ingest, no webhook.
+- **Hooks Worker** `inhouse-ops-hooks` (`src/hooks.ts`, `wrangler.hooks.toml`): only
+  `/hooks/quo`, same D1 database, no Access.
+  - Access on a Worker covers every path and can only be bypassed whole-Worker, and Quo can't sign
+    in. So the webhook can't share the console Worker (round 11).
+  - It trusts only the signature (invariant 10).
 - **GitHub Actions, hourly** (`.github/workflows/ingest.yml` → `scripts/ingest.mjs`): runs Gmail
   and Quo ingest as plain Node, writing to the same D1 database through Cloudflare's D1 REST API
   (`src/db/d1-http.ts`). The ingest code, triage rules and clock are the same code either way;
@@ -33,20 +39,16 @@ longer required.** The trade, recorded so nobody discovers it later:
   call blocked for 5 minutes past that); each run stays under 1,000 D1 statements. GitHub Free
   allows 2,000 Actions minutes a month for a private repo; the 2-minute job timeout caps the
   worst case at 1,460. D1 Free allows 5 million rows read and 100,000 written a day.
-- **The Worker's own CPU on Workers Free is over the 10 ms limit on the busiest routes
-  (round 10, measured locally).** Measured in workerd (`wrangler dev`) against a local D1 holding
-  about a year of fabricated volume (4,365 threads), with V8's sampling profiler, 150 requests per
-  route. Trimmed mean CPU per request:
-  - `GET /api/queue` ~29–30 ms
-  - `POST /api/actions` ~17 ms
-  - `POST /hooks/quo` ~11 ms
-  - `GET /api/board`, `GET /api/todos`, `GET /api/threads/:id` ~5–6 ms
-  - small writes ~3 ms
-  Most of the queue's cost is the D1 binding decoding result rows inside the isolate, which
-  counts as CPU on Cloudflare too. Cutting bulk and spam to 50 rows only brought it to ~23 ms.
-  Cloudflare tolerates infrequent overruns but terminates a Worker that hits the limit
-  consistently (error 1102). **Owner decision pending:** Workers Paid for the Worker, or a
-  cheaper queue design, measured on Cloudflare before go-live. See HANDOFF, "Worker CPU".
+- **Worker CPU on Workers Free: close to the 10 ms limit, not comfortably under it (rounds 10–11,
+  measured locally).** The UI makes several small requests, each measured in workerd against a
+  local D1 of 4,365 fabricated threads (trimmed mean):
+  - one queue tier page ~6.6–8.6 ms
+  - board ~6.4 ms
+  - to-dos ~5.6 ms
+  p90s run 14–24 ms. The single-call `GET /api/queue` (all tiers) is still ~17 ms. The cost is
+  mostly the D1 binding turning rows into objects inside the isolate, plus a fixed cost per D1
+  call. Measure on Cloudflare after deploy (RUNBOOK §6). Error 1102s mean Workers Paid for the
+  console, or more query work. See HANDOFF, "Worker CPU".
 
 ## Commands
 
@@ -54,9 +56,9 @@ longer required.** The trade, recorded so nobody discovers it later:
 |---|---|
 | `npm run check` | Typechecks `src/` against `@cloudflare/workers-types` (strict). |
 | `npm test` | Runs `tests/*.test.mjs` with `node:test`. Node strips the types from the `.ts` imports, so there's no build step. Ingest and webhook tests run the real `schema.sql` on `node:sqlite` (`tests/helpers/d1.mjs`) with provider APIs faked. |
-| `npm run build` | `wrangler deploy --dry-run --outdir dist`. Bundles locally and never contacts Cloudflare. |
+| `npm run build` | Dry-run bundles of both Workers (`wrangler.toml`, `wrangler.hooks.toml`). Never contacts Cloudflare. |
 | `npm run prove:oauth` | Local Google OAuth flow that prints a gmail.readonly refresh token for one mailbox. |
-| `npm run deploy`, `npm run db:init` | **Human only.** Both touch production. Never run them. |
+| `npm run deploy`, `npm run deploy:hooks`, `npm run db:init` | **Human only.** They touch production. Never run them; see `RUNBOOK.md`. |
 | `node scripts/ingest.mjs` | **Human only (or Actions).** One ingest run against production D1. Needs the `CLOUDFLARE_*` variables. |
 
 `check`, `test` and `build` must all be clean before a round is reported done.
@@ -219,6 +221,13 @@ tier is shown, and every non-customer verdict carries its reasons to the UI.
   - Tests: `tests/gmail-incremental.test.mjs`, `tests/gmail-population.test.mjs`.
 - **The UI has three sections** (`public/queue-sections.mjs`): Needs reply, Probably not
   customers (with reason chips), and Spam at the bottom with a count.
+  - **Paged per tier, visibly** (round 11):
+    - `GET /api/queue?tier=&offset=` returns 50 rows of one tier plus its total.
+    - The UI loads each tier separately and shows "Showing 50 of 120" with "Show 50 more".
+    - Each tier is still its own statement, so no tier can crowd another out
+      (`tests/queue-tiers.test.mjs`, `tests/queue-paging.test.mjs`).
+    - Rows carry only what the list renders; preview and notes come with `GET /api/threads/:id`.
+    - To-dos are paged the same way (100, with a total).
   - Header and per-brand counts ("N need a reply", brand cells, `/api/board`) count Needs reply
     only. Bulk and spam are counted in their own sections. Tests: `tests/header-counts.test.mjs`.
   - Unknown tiers show as Needs reply.
@@ -342,8 +351,9 @@ Never by a shared or rotating login.
   to-do is a 404, never a 500. Tests: `tests/api-hardening.test.mjs`.
 
 ### 10. Public endpoints trust nothing unsigned
-`/hooks/quo` verifies a Standard Webhooks signature, per Quo's versioned docs for API 2026-03-30,
-over the raw body before trusting it (`src/lib/quo-signature.ts`).
+`/hooks/quo` (on the hooks Worker, `src/webhook.ts`) verifies a Standard Webhooks signature, per
+Quo's versioned docs for API 2026-03-30, over the raw body before trusting it
+(`src/lib/quo-signature.ts`). The console Worker answers `/hooks/*` with 404.
 - **Headers:** `webhook-id`, `webhook-timestamp` (seconds), and `webhook-signature` (`v1,<b64>`
   entries).
 - **Signature:** HMAC-SHA256 over `id.timestamp.body`, with the `whsec_` secret as the key.
@@ -354,10 +364,25 @@ over the raw body before trusting it (`src/lib/quo-signature.ts`).
 - Any new public webhook needs the same: verify first, fail closed, and test both a valid and an
   invalid signature.
 
+### 11. A broken or stale console never looks like a quiet one (round 11)
+- The header shows each source's last successful sync, from `/api/board` (`sources`, plus `now`, the
+  server's clock). Over 3 hours is a warning; over 12, or never synced, is an error
+  (`public/freshness.mjs`).
+- `source.last_synced_at` moves only when a source's run succeeds. A disabled schedule, expired
+  token, quota or API change all show up the same way.
+- An empty Needs reply says "Nothing waiting" only when the API answered and every source is fresh.
+  Otherwise it says the list may be out of date, or that loading failed.
+- A brand × channel cell says "clear" only if the board loaded and that brand's source for that
+  channel is fresh. Otherwise: "not verified: synced 13 h ago", "not connected", or "? not loaded".
+  The to-do list says "Could not load to-dos", never "Nothing on the list", when it failed.
+- Tests: `tests/sync-freshness.test.mjs`, `tests/ui-wiring.test.mjs`.
+
 ## Layout
 
 ```
-src/index.ts              Worker: auth (Access JWT), /api routes, /hooks/quo. No ingest, no cron.
+src/index.ts              console Worker: auth (Access JWT), /api routes (paged queue and to-dos). No ingest, no cron, no webhook.
+src/hooks.ts              hooks Worker: /hooks/quo only (no Access)
+src/webhook.ts            the Quo webhook handler: verify, dedupe by webhook-id, syncQuoActivity
 src/ingest/gmail.ts       Gmail threads (service-account auth) → timeline → syncThread (customer = first inbound sender)
 src/ingest/quo.ts         Quo v1 messages + calls since source.sync_cursor → syncThread
 src/ingest/chat.ts        provider-agnostic chat → syncThread (not routed yet)
@@ -372,7 +397,11 @@ src/lib/triage.ts         demotion rules (pure)
 src/lib/clock.ts          business-minutes clock (pure)
 src/lib/quo-signature.ts  Quo webhook verification (Standard Webhooks)
 schema.sql                D1 schema + brand seed
-public/index.html         UI, mock data until USE_API = true
+public/index.html         UI: real API only, paged tiers, freshness badges, 60-second refresh
+public/render.mjs         escaped HTML builders (thread, history, to-dos, matrix cells)
+public/freshness.mjs      last-sync classification, badges, empty/failed queue messages
+public/paging.mjs         refresh that keeps pages the agent opened
+RUNBOOK.md                the ordered deploy steps, mine vs yours, and what can't be undone
 prove/*.mjs               run-by-hand source proofs; need real credentials (Gmail: GOOGLE_SERVICE_ACCOUNT_FILE).
                           Never in cron. backfill-known-senders.mjs (one-off), apply-known-senders.mjs
                           (setup, filters our own domain) and ingest-live.mjs write customer data to

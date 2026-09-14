@@ -385,54 +385,94 @@ repository inactivity, silently. GitHub documents this for public repos and does
 - **Scheduled workflows run only from the default branch.** `main` has no commits yet, so nothing
   runs on a schedule until this branch is merged.
 
-## Worker CPU (round 10): the busiest routes exceed Workers Free's 10 ms
+## Worker CPU (rounds 10–11)
 
-**Plainly: at realistic volume, `GET /api/queue` uses about three times Workers Free's CPU limit
-on every request. `POST /api/actions` and the Quo webhook are also over. This bears on the
-hosting decision.**
+**Round 10: over the limit.** The single queue call used ~30 ms of CPU per request locally against
+Workers Free's 10 ms.
 
-**How it was measured:**
-- **Runtime:** the real Worker in workerd (`wrangler dev`, local). Access was answered by a test
-  key, so JWT verification ran for real.
-- **Data:** a local D1 with about a year of fabricated volume at support@'s observed rates, plus
-  phone: 4,365 threads (2,201 spam and 499 bulk waiting, 32 Needs reply), 2,735 actions, 1,633
-  responses, 300 to-dos.
-- **Method:** V8's sampling profiler over the inspector, 1 ms sampling, local tracing off, 150
-  requests per route. CPU is every non-idle sample; waiting on D1 is idle, as on Cloudflare.
-  Figures are the mean per request with the top 10% dropped:
+**Round 11: close to it, not comfortably under.**
+- **Setup:** same database (4,365 fabricated threads, rebuilt from the same seed), same method:
+  workerd via `wrangler dev`, V8 sampling profiler at 1 ms, 150 requests per route, local tracing off.
+- **Changes:** the queue is paged at 50 per tier, totals come from one grouped `COUNT(*)`, list rows
+  carry 15 columns instead of 19, and the UI loads each tier separately. CPU per request (trimmed
+  mean / median):
 
-| Route | CPU per request | Response |
-|---|---|---|
-| baseline: 401, no work | 0.2 ms | |
-| baseline: JWT verification only | 1.8 ms | |
-| `GET /api/queue` (owner or agent) | **29–30 ms** | 296 kB, ~900 rows |
-| `POST /api/actions` (reply, answered) | **17 ms** | |
-| `POST /hooks/quo` (new conversation) | **11 ms** | |
-| `GET /api/todos` | 6 ms | 18 kB |
-| `GET /api/board` | 5 ms | |
-| `GET /api/threads/:id` (40 actions) | 5 ms | 6 kB |
-| `POST /api/todos`, `POST /api/todos/:id/done` | 3 ms | |
+| Route | Response | Round 10 | Round 11 |
+|---|---|---|---|
+| `GET /api/queue` (all tiers, one call) | 59 kB (was 296) | 29–30 ms | **17 / 19 ms: still over** |
+| `GET /api/queue?tier=spam` (what the UI loads) | 22 kB | — | 8.6 / 9.3 ms |
+| `GET /api/queue?tier=customer` | 12 kB | — | 6.6 / 7.4 ms |
+| `GET /api/board` (now 3 statements) | 1 kB | 5 ms | 6.4 / 8.9 ms |
+| `GET /api/todos` (now 2 statements) | 19 kB | 6 ms | 5.6 / 7.0 ms |
+| baseline 401, no work | | 0.2 ms | 0.2 ms |
 
-**Where the queue's time goes:** the profile puts it in the D1 binding decoding results inside the
-isolate (`cloudflare-internal:d1-api`), reading response bodies, and converting results. That
-code runs in the Worker's isolate on Cloudflare too, so it counts. Cutting bulk and spam to 50
-rows each (116 kB) only brought it to ~23 ms, so trimming rows alone won't reach 10 ms.
+p90s for the UI's requests are 14–24 ms, so bursts over 10 ms are routine locally.
 
-**Caveats:**
-- This is a local machine, not Cloudflare's edge, and the local D1 path isn't guaranteed to be
-  identical to production's.
-- Sampling at 1 ms is coarse per request, which is why means over 150 requests are used.
-- The true production figure needs a deploy: Workers Observability reports CPU time per invocation.
+**What costs the time** (profile breakdown of the one-call queue; the D1 binding's source is
+embedded in workerd):
+- **~6.7 ms:** the binding's `toArrayOfObjects`, which turns each result row into an object with
+  `Object.fromEntries`: one object and one small array per cell.
+- **A fixed per-call cost:** the fetcher round trip, tracing spans (`setAttributes`, `enterSpan`),
+  `text()` plus `JSON.parse`. The 3-statement board costs ~6 ms with almost no rows.
+- **~1.5 ms** our own JSON response, ~0.8 ms garbage collection, and ~0.5–1.8 ms verifying the
+  Access JWT.
 
-**What Cloudflare does:** 10 ms per request on Free; waiting on D1 doesn't count. "Some built-in
-flexibility" for infrequent overruns, but a Worker hitting the limit consistently gets error 1102.
+**Variants measured and not shipped:**
+- 50 rows per tier with full columns: ~23 ms.
+- Slim columns in one call: ~15–17 ms.
+- All four statements in a single `batch()`: ~12–15 ms. Not shipped, because the round-9 separation
+  test records rows per statement, and a batch hides them.
 
-**Owner decision:**
-1. Workers Paid for the Worker ($5/month; 30 s default CPU), keeping ingest on Actions, or
-2. Redesign the queue for fewer, cheaper D1 calls, e.g. counts first, and bulk/spam rows loaded
-   only when opened. Not done.
+**Caveats:** a local machine, not the edge; 1 ms sampling; the production D1 path may differ.
+Measure on Cloudflare (Workers Observability) after deploy, RUNBOOK §6.
 
-Either way, measure on Cloudflare before go-live.
+**If Cloudflare shows 1102s:** Workers Paid ($5/month) for the console Worker, or fewer rows per
+request (e.g. 25 per page) and fewer statements.
+
+## Round 11 UI run: what broke
+
+The UI ran for the first time against the real API: `wrangler dev` with a local D1, fabricated data
+at ~1 year's volume, an Access test key, and a minted owner cookie. Every path was exercised in the
+browser:
+- all three tiers
+- paging
+- counts against the matrix
+- logging a reply (the thread left Needs reply; counts and matrix dropped by one)
+- blocking
+- filters, My queue, opening a spam row
+- adding and completing a to-do
+- stale, fresh and failed states
+
+**Five bugs, all fixed test-first in round 11:**
+1. **The matrix said "clear"** in every cell with the API returning 401, with email 13 hours stale,
+   for chat (no source at all), and for THI's email (InHouse's mailbox was the fresh one). The to-do
+   panel said "Nothing on the list" when to-dos had failed to load.
+2. **The 60-second refresh reloaded every tier from page one,** collapsing "Show 50 more".
+3. **"Blocked on" was always visible:** `label.field { display: block }` overrode `[hidden]`.
+4. **`/api/todos` returned at most 100 rows with no total:** the 101st open to-do, the one just
+   added, never appeared. The round-8 queue bug again, in the to-do list.
+5. **The error banner called `emptyQueueHtml` without its escaper,** so the first API failure would
+   have thrown instead of showing the error.
+
+**Seen and left as they are:**
+- With a client-side filter on (brand, Unassigned, Blocked, Over 24h), a section counts only the
+  loaded rows, e.g. "(50)", and offers no next page.
+- After an API failure, the last-loaded rows stay on screen under the red banner.
+- `headerCounts` and `brandCell` in `public/queue-sections.mjs` are still tested but no longer used
+  by the UI, which reads totals from the API.
+- The benchmark and UI-run harness (dev entry, seed generator, profiler) lives in the scratchpad,
+  not the repo.
+
+## The webhook is a separate Worker (round 11 decision)
+
+Found while writing the runbook. Cloudflare Access at Worker level "automatically protects every
+domain associated with the Worker", and its bypass is whole-Worker only; per-path exemptions need a
+zone and hostname-based Access. Quo can't sign in, so `/hooks/quo` on the console Worker would have
+been blocked the moment Access was turned on, and phone would have silently gone back to hourly.
+
+So the webhook runs as `inhouse-ops-hooks` (`src/hooks.ts`, `wrangler.hooks.toml`): no UI, no API,
+same database, signature-only. Preview URLs are off on both Workers. The alternative is a zone with
+hostname-based Access and a path Bypass, which the owner ruled out.
 
 ## Scale and cost — verify before go-live
 

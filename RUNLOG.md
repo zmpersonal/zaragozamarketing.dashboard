@@ -5,6 +5,45 @@ still unproven.
 
 ---
 
+## Round 11 — a cheap queue, visible failure, the real UI, and a runbook (2026-09-14, branch `claude/inh-round-11`, cut from `claude/inh-round-10`)
+
+Nothing was deployed, merged, pushed, or PR'd. All UI work used fabricated data on a local D1.
+
+### What changed
+1. **Paged queue** (`90f41e3`): 50 rows per tier, `?tier=&offset=`, totals from one grouped
+   `COUNT(*)`, id tie-break, slim list rows. Round 10's 296 kB single call is now 59 kB, and the UI
+   loads each tier separately.
+2. **Sync freshness and the real UI** (`d4e18a0`).
+   - `/api/board` returns each source's last successful sync and the server clock. Badges warn past
+     3 h and error past 12 h.
+   - Empty or failed queues never read as "nothing waiting".
+   - `index.html` has no mock data. Five bugs found running it are fixed (HANDOFF, "Round 11 UI run").
+3. **Webhook Worker split** (`1614546`). Access on the console Worker would have blocked Quo, so
+   `/hooks/quo` is now its own Worker on the same D1. Preview URLs are off on both.
+4. **`RUNBOOK.md`:** ordered deploy steps, yours vs mine, and the one-way steps.
+
+### Failing first, then passing
+- **Paging:** 5/5 failed on the round-10 queue (with only `QUEUE_PAGE` added); 7/7 after, including
+  a row-shape test and a ties test added after the id tie-break break was missed.
+  - 12 breaks, all caught after that fix.
+  - `tests/queue-tiers.test.mjs`: the separation, unknown-tier and agent tests pass unchanged. One
+    line in the realistic-mix test expected 60 bulk rows under the old 200-row limit and now
+    expects a 50-row page of 60; its customer-completeness checks are unchanged.
+- **Freshness:** the module was missing and the board had no sources; 8/8 after.
+- **UI bugs:** the new tests failed to load (no modules). The later brand-matching fix failed 2,
+  then passed. 22/22 breaks caught across freshness, matrix, to-dos, paging reload, `[hidden]`,
+  sections and escaping.
+- **Worker split:** failed to load (no `src/hooks.ts`); 4/4 after; 5/5 breaks caught.
+- **Totals:** 309 tests, 309 pass, 0 fail. Check and build (both Workers) are clean, verified after
+  staging.
+
+### Measured
+`GET /api/queue`, same 4,365-thread database: ~17 ms trimmed mean (was ~30). The per-tier requests
+the UI makes are 6.6–8.6 ms; board 6.4; to-dos 5.6. p90s are 14–24 ms. Still close to Free's 10 ms
+(HANDOFF, "Worker CPU").
+
+---
+
 ## Round 10 — webhook ingest, and the remaining deploy blockers (2026-09-14, branch `claude/inh-round-10`, cut from `claude/inh-round-9`)
 
 Nothing was deployed, merged, pushed, or PR'd. No history was rewritten.
