@@ -61,7 +61,8 @@ test('empty cursor: the first run is bounded, and later runs catch up without re
   const account = busyAccount(total);
 
   const first = await run(env, account, T0, { pageSize: 10 });
-  assert.equal(await count(env), QUO_LIMITS.conversationsPerRun, 'first run reads at most conversationsPerRun');
+  // Small pages: the listing cap (listPagesPerRun × 10) or the conversation cap, whichever is lower, binds.
+  assert.equal(await count(env), Math.min(QUO_LIMITS.conversationsPerRun, QUO_LIMITS.listPagesPerRun * 10), 'first run is bounded');
   assert.ok(first.requests.filter((u) => u.pathname === '/v1/conversations').length <= QUO_LIMITS.listPagesPerRun);
   assert.equal(first.cursor.highWater, null, 'not advanced until the whole window is read');
   assert.ok(first.cursor.scan && (first.cursor.scan.pending.length > 0 || first.cursor.scan.pageToken), 'the rest is queued or behind the stored page token');
@@ -135,10 +136,12 @@ test('over budget: a run stops inside its fetch and query budget; the rest waits
 
 test('one listing page bigger than the per-run cap still reads at most conversationsPerRun', async () => {
   const env = makeQuoEnv();
+  // Real pages hold up to 100 conversations; the cap must be below that for this to mean anything.
+  assert.ok(QUO_LIMITS.conversationsPerRun < 100);
   const account = busyAccount(QUO_LIMITS.conversationsPerRun + 30);
-  const r = await run(env, account, T0); // real page size: the whole window arrives in one page
+  const r = await run(env, account, T0); // real page size: 100 conversations arrive in one page
   assert.equal(r.requests.filter((u) => u.pathname === '/v1/messages').length, QUO_LIMITS.conversationsPerRun);
-  assert.equal(r.cursor.scan.pending.length, 30);
+  assert.equal(r.cursor.scan.pending.length, 100 - QUO_LIMITS.conversationsPerRun);
 });
 
 test('over the fetch budget: fetches count toward subrequests and the run stops inside it', async () => {
@@ -195,8 +198,8 @@ test('an expired listing page token drops the scan; the next run starts it again
 
 // --- defaults and worst case -----------------------------------------------------------------
 
-test('defaults stay under Workers Paid caps, and one source worst case fits them', () => {
-  assert.ok(QUO_LIMITS.maxSubrequests <= 10_000 && QUO_LIMITS.maxD1Queries <= 1_000);
+test('defaults are finite, and one source worst case fits them (the runner caps are justified in tests/run-limits)', () => {
+  assert.ok(Number.isFinite(QUO_LIMITS.maxSubrequests) && Number.isFinite(QUO_LIMITS.maxD1Queries));
   const worstFetches = QUO_LIMITS.listPagesPerRun + QUO_LIMITS.conversationsPerRun * 2 * QUO_LIMITS.pagesPerConversation;
   assert.ok(worstFetches <= QUO_LIMITS.maxSubrequests, `fetches ${worstFetches}`);
 });

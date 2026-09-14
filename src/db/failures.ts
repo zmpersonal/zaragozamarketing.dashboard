@@ -7,6 +7,8 @@
  * phone ingest. A successful sync deletes the row. /api/board lists them.
  */
 
+import type { Db } from './db.ts';
+
 export const SKIP_AFTER_FAILURES = 3;
 
 export interface FailureOutcome {
@@ -16,7 +18,7 @@ export interface FailureOutcome {
 }
 
 export async function recordFailure(
-  db: D1Database, sourceId: string, itemId: string, error: unknown, now: number,
+  db: Db, sourceId: string, itemId: string, error: unknown, now: number,
 ): Promise<FailureOutcome> {
   const message = String(error instanceof Error ? error.message : error).slice(0, 500);
   await db.prepare(`
@@ -35,11 +37,11 @@ export async function recordFailure(
   return { failures, skipped: failures >= SKIP_AFTER_FAILURES };
 }
 
-export async function clearFailure(db: D1Database, sourceId: string, itemId: string): Promise<void> {
+export async function clearFailure(db: Db, sourceId: string, itemId: string): Promise<void> {
   await db.prepare('DELETE FROM ingest_failure WHERE source_id = ?1 AND item_id = ?2').bind(sourceId, itemId).run();
 }
 
-export async function listFailures(db: D1Database) {
+export async function listFailures(db: Db) {
   const { results } = await db.prepare(`
     SELECT source_id, item_id, failures, first_failed_at, last_failed_at, last_error, skipped_at
     FROM ingest_failure

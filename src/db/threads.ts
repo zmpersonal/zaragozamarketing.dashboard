@@ -10,6 +10,7 @@
  */
 import { completedWaits, resolveState, type Existing, type Observed } from '../lib/thread-state.ts';
 import { businessMinutes } from '../lib/clock.ts';
+import type { Db, DbStatement } from './db.ts';
 
 /**
  * Store one response measurement. INSERT OR IGNORE on UNIQUE(thread_id,
@@ -17,16 +18,16 @@ import { businessMinutes } from '../lib/clock.ts';
  * or an agent saw it end first.
  */
 export function responseInsert(
-  db: D1Database, threadId: string, awaitingSince: number, respondedAt: number,
+  db: Db, threadId: string, awaitingSince: number, respondedAt: number,
   via: 'message' | 'replied' | 'called' | 'closed', actor: string, now: number,
-): D1PreparedStatement {
+): DbStatement {
   return db.prepare(
     `INSERT OR IGNORE INTO response (thread_id, awaiting_since, responded_at, business_minutes, via, actor, created_at)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
   ).bind(threadId, awaitingSince, respondedAt, businessMinutes(awaitingSince, respondedAt), via, actor, now);
 }
 
-async function recordWaits(db: D1Database, threadId: string, existing: Existing | null, timeline: Observed[], now: number) {
+async function recordWaits(db: Db, threadId: string, existing: Existing | null, timeline: Observed[], now: number) {
   const waits = completedWaits(existing, timeline);
   if (!waits.length) return;
   await db.batch(waits.map((w) => responseInsert(db, threadId, w.awaiting_since, w.responded_at, 'message', 'system', now)));
@@ -55,7 +56,7 @@ export interface ThreadObservation {
 
 export type SyncResult = 'inserted' | 'updated' | 'reopened' | 'unblocked' | 'skipped';
 
-export async function syncThread(db: D1Database, o: ThreadObservation, now: number): Promise<SyncResult> {
+export async function syncThread(db: Db, o: ThreadObservation, now: number): Promise<SyncResult> {
   const existing = await db
     .prepare('SELECT status, last_inbound_at, last_outbound_at, awaiting_since FROM thread WHERE id = ?1')
     .bind(o.id)
@@ -143,7 +144,7 @@ export async function syncThread(db: D1Database, o: ThreadObservation, now: numb
  * customer wrote when they wrote, and the response clock must say so.
  * Returns false if there is no such thread.
  */
-export async function rescueThread(db: D1Database, threadId: string, actor: string, now: number): Promise<boolean> {
+export async function rescueThread(db: Db, threadId: string, actor: string, now: number): Promise<boolean> {
   const found = await db.prepare('SELECT 1 AS ok FROM thread WHERE id = ?1').bind(threadId).first();
   if (!found) return false;
   await db.batch([

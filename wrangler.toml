@@ -1,4 +1,5 @@
 name = "inhouse-ops"
+account_id = "0ef0279e4af302865cd2009458864c1b"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
 
@@ -9,21 +10,21 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "inhouse-ops"
-database_id = "PUT_YOUR_D1_ID_HERE"
+database_id = "4f562bdf-560b-4c82-a84e-554aa8c2bcb7"
 
-# Gmail every 5 minutes (:00, :05, ...) and Quo every 5 minutes offset by 2
-# (:02, :07, ...). Separate triggers give each its own per-invocation
-# subrequest budget. Must match GMAIL_CRON / QUO_CRON in src/index.ts.
-[triggers]
-crons = ["*/5 * * * *", "2-59/5 * * * *"]
+# No cron triggers: ingest runs on GitHub Actions (.github/workflows/ingest.yml),
+# writing to this database through the D1 REST API. The Worker serves the UI,
+# the API and the Quo webhook only.
 
 [vars]
 ACCESS_TEAM = "CHANGE_ME"           # <team>.cloudflareaccess.com
 ACCESS_AUD  = "CHANGE_ME"           # Access app audience tag
 OWNERS      = "you@inhousewellness.com"
 
-# Secrets — set with `wrangler secret put NAME`, never in this file:
-#   GOOGLE_SERVICE_ACCOUNT_JSON  (service-account key JSON; domain-wide delegation, gmail.readonly)
-#                                npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON < /path/to/key.json
-#   QUO_API_KEY
+# Worker secret — set with `wrangler secret put NAME`, never in this file:
 #   QUO_WEBHOOK_SECRET      (whsec_... key returned by POST /webhooks, Quo-Api-Version 2026-03-30)
+#
+# The ingest credentials are NOT Worker secrets any more. They live in GitHub
+# Actions secrets for .github/workflows/ingest.yml:
+#   GOOGLE_SERVICE_ACCOUNT_JSON, QUO_API_KEY,
+#   CLOUDFLARE_API_TOKEN (D1 edit only), CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_D1_DATABASE_ID

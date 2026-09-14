@@ -53,15 +53,17 @@ test('empty cursor: bounded backfill stores the historyId and catches up over la
   const total = GMAIL_LIMITS.threadsPerRun * 2 + 10;
   const threads = manyThreads(total);
 
-  const first = await run(env, threads);
+  // Pages as large as the backfill asks for (Gmail allows 500), so the per-run thread cap is what binds.
+  const page = { pageSize: GMAIL_LIMITS.backfillPageSize };
+  const first = await run(env, threads, page);
   assert.equal(await ingested(env), GMAIL_LIMITS.threadsPerRun, 'first run is capped');
   assert.match(first.cursor.historyId, /^\d+$/);
   assert.equal(first.cursor.pending.length, total - GMAIL_LIMITS.threadsPerRun);
   assert.ok(first.logs.some((l) => l.includes('mode=backfill') && l.includes(`query "${RECEIVED_QUERY}"`)), first.logs.join('\n'));
   assert.equal(first.paths.filter((p) => p === 'threads/:id').length, GMAIL_LIMITS.threadsPerRun);
 
-  await run(env, threads);
-  const third = await run(env, threads);
+  await run(env, threads, page);
+  const third = await run(env, threads, page);
   assert.equal(await ingested(env), total, 'later runs catch up');
   assert.deepEqual(third.cursor.pending, []);
   assert.equal(third.cursor.historyId, first.cursor.historyId, 'nothing changed, so the historyId is unchanged');
@@ -168,10 +170,9 @@ test('a run never exceeds its subrequest budget; overflow stays pending for the 
   assert.equal(await ingested(env), 40, 'all threads arrive over later runs');
 });
 
-test('default budget stays under Cloudflare Workers Paid caps (10,000 subrequests, 1,000 D1 queries)', () => {
-  assert.ok(GMAIL_LIMITS.maxSubrequests <= 10_000);
-  assert.ok(GMAIL_LIMITS.maxD1Queries <= 1_000);
-  assert.ok(GMAIL_LIMITS.maxD1Queries <= GMAIL_LIMITS.maxSubrequests, 'D1 queries are subrequests too');
+test('default budget is finite and D1 queries count within it (the runner caps are justified in tests/run-limits)', () => {
+  assert.ok(Number.isFinite(GMAIL_LIMITS.maxSubrequests) && Number.isFinite(GMAIL_LIMITS.maxD1Queries));
+  assert.ok(GMAIL_LIMITS.maxD1Queries <= GMAIL_LIMITS.maxSubrequests, 'D1 queries count toward the total too');
 });
 
 test('worst case per run fits the default budget with 3 mailboxes', async () => {
@@ -189,23 +190,11 @@ test('worst case per run fits the default budget with 3 mailboxes', async () => 
   assert.ok(subrequests <= GMAIL_LIMITS.maxSubrequests, `subrequests ${subrequests} <= ${GMAIL_LIMITS.maxSubrequests}`);
 });
 
-// --- cron routing -----------------------------------------------------------------------------
+// --- where ingest runs ---------------------------------------------------------------------------
 
-test('Gmail and Quo run on separate cron triggers, so each gets its own subrequest budget', async () => {
-  const calls = [];
-  const env = makeEnv();
-  const real = globalThis.fetch;
-  globalThis.fetch = async (input) => { calls.push(new URL(typeof input === 'string' ? input : input.url ?? String(input)).host); return new Response('{}', { status: 500 }); };
-  const quiet = console.error; console.error = () => {};
-  const log = console.log; console.log = () => {};
-  const waits = [];
-  const ctx = { waitUntil: (p) => waits.push(p) };
-  try {
-    await worker.scheduled({ cron: '*/5 * * * *' }, env, ctx); await Promise.all(waits); waits.length = 0;
-    const gmailHosts = new Set(calls); calls.length = 0;
-    await worker.scheduled({ cron: '2-59/5 * * * *' }, { ...env, QUO_API_KEY: 'k' }, ctx); await Promise.all(waits);
-    const quoHosts = new Set(calls);
-    assert.ok([...gmailHosts].every((h) => h.endsWith('googleapis.com')), [...gmailHosts].join());
-    assert.ok(![...quoHosts].some((h) => h.endsWith('googleapis.com')), [...quoHosts].join());
-  } finally { globalThis.fetch = real; console.error = quiet; console.log = log; }
+test('the Worker does not ingest: no scheduled handler and no cron triggers (ingest runs on GitHub Actions)', async () => {
+  const { readFileSync } = await import('node:fs');
+  assert.equal(typeof worker.scheduled, 'undefined');
+  const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+  assert.doesNotMatch(toml.replace(/#.*$/gm, ''), /\[triggers\]|crons\s*=/);
 });

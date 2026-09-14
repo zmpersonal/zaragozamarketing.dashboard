@@ -24,7 +24,7 @@
  * Each thread gets a triage tier from its first inbound message; status and
  * awaiting_since come from the full timeline (lib/thread-state.ts).
  */
-import type { Env } from '../index.ts';
+import type { Db, IngestEnv } from '../db/db.ts';
 import { emailOf } from '../lib/triage.ts';
 import type { Observed } from '../lib/thread-state.ts';
 import { syncThread } from '../db/threads.ts';
@@ -32,22 +32,31 @@ import { clearFailure, recordFailure } from '../db/failures.ts';
 import { GMAIL_READONLY, parseServiceAccount, serviceAccountToken, type ServiceAccountKey } from '../lib/google-auth.ts';
 import { classify, type Exemptions } from '../lib/triage.ts';
 import { Budget } from '../lib/budget.ts';
+import type { IngestSummary } from './quo.ts';
 
 const WINDOW_DAYS = 30;
 export const RECEIVED_QUERY = `in:anywhere newer_than:${WINDOW_DAYS}d -in:sent -in:drafts -in:chats`;
 
+/**
+ * Per-run caps, sized for an hourly GitHub Actions run (round 9), not the
+ * Workers 50-subrequest ceiling they were first sized for. The binding limits
+ * are the Cloudflare API rate (D1 statements: Gmail 600 + Quo 400 per run, under
+ * 1,200 per 5 minutes) and the run's wall-clock deadline (scripts/ingest.mjs).
+ * The counts are backstops so a bug can't run away.
+ */
 export const GMAIL_LIMITS = {
-  /** threads fetched per mailbox per run */
-  threadsPerRun: 25,
-  /** messages per backfill / fallback page; one page per run */
-  backfillPageSize: 100,
+  /** threads fetched per mailbox per run: a 30-day support@ backlog (~260) clears in 2-3 runs */
+  threadsPerRun: 150,
+  /** messages per backfill / fallback page (Gmail's maximum is 500) */
+  backfillPageSize: 500,
   /** history.list pages per run (up to 500 records each) */
-  historyPages: 2,
+  historyPages: 5,
   /** cap on queued thread ids carried in the cursor */
-  maxPending: 500,
-  /** per invocation, all mailboxes. Workers Paid allows 10,000 subrequests and 1,000 D1 queries. */
-  maxSubrequests: 900,
-  maxD1Queries: 900,
+  maxPending: 5000,
+  /** per run, all mailboxes: fetches + D1 statements */
+  maxSubrequests: 2000,
+  /** per run, all mailboxes. With Quo's 400, under Cloudflare's 1,200 API requests per 5 minutes. */
+  maxD1Queries: 600,
 };
 
 /**
@@ -92,7 +101,7 @@ async function gmailGet(budget: Budget, auth: Record<string, string>, path: stri
 }
 
 /** Exemptions from our own records: sender rules (verified customers, spam senders) and everyone we have replied to. */
-async function loadExemptions(db: D1Database): Promise<Exemptions> {
+async function loadExemptions(db: Db): Promise<Exemptions> {
   const rules = (await db.prepare('SELECT address, verdict FROM sender_rule').all<{ address: string; verdict: string }>()).results;
   const replied = (await db.prepare(`
     SELECT address FROM known_sender WHERE replied_at IS NOT NULL
@@ -153,12 +162,13 @@ async function readHistory(budget: Budget, auth: Record<string, string>, cursor:
   return { expired: false as const, changed, historyId };
 }
 
-export async function ingestGmail(env: Env, budget: Budget = Budget.from(env, GMAIL_LIMITS)) {
+export async function ingestGmail(env: IngestEnv, budget: Budget = Budget.from(env, GMAIL_LIMITS)): Promise<IngestSummary> {
+  const summary: IngestSummary = { failedSources: [], failedItems: 0, processed: 0 };
   const db = budget.wrap(env.DB);
   const benv = { ...env, DB: db };
   const { results: sources } = await db
     .prepare(`SELECT * FROM source WHERE provider = 'gmail'`).all<any>();
-  if (!sources.length) return;
+  if (!sources.length) return summary;
 
   // One service account with domain-wide delegation reads every mailbox by
   // impersonating it (sub = the mailbox), scope gmail.readonly only.
@@ -167,7 +177,8 @@ export async function ingestGmail(env: Env, budget: Budget = Budget.from(env, GM
     serviceAccount = parseServiceAccount(env.GOOGLE_SERVICE_ACCOUNT_JSON);
   } catch (err) {
     console.error(`gmail ingest skipped: GOOGLE_SERVICE_ACCOUNT_JSON is not usable (${(err as Error).message})`);
-    return;
+    summary.failedSources = sources.map((s: any) => s.address);
+    return summary;
   }
 
   for (const src of sources) {
@@ -232,28 +243,32 @@ export async function ingestGmail(env: Env, budget: Budget = Budget.from(env, GM
         } catch (err) {
           if (err instanceof DeferThread) break; // too big for what's left of this run; it stays first in line
           // One malformed thread is logged, recorded in ingest_failure, and skipped.
+          summary.failedItems++;
           const { failures } = await recordFailure(db, src.id, itemId, err, Math.floor(Date.now() / 1000));
           console.error(`gmail ingest skipped thread ${threadId} in ${src.address} (failure ${failures})`, err);
         }
         cursor.pending.shift();
         processed++;
+        summary.processed++;
       }
     } catch (err) {
       // Token, listing or history failure: this mailbox is skipped this run. One dead
       // mailbox must not stop the others. The cursor is not advanced.
       console.error(`gmail ingest failed for ${src.address}`, err);
+      summary.failedSources.push(src.address);
       continue;
     }
 
     await db.prepare(`UPDATE source SET last_synced_at = ?2, sync_cursor = ?3 WHERE id = ?1`)
       .bind(src.id, Math.floor(Date.now() / 1000), JSON.stringify(cursor)).run();
-    console.log(`gmail ingest ${src.address}: mode=${mode} ${detail}; processed ${processed} threads, ${cursor.pending.length} pending; subrequests fetch=${budget.fetches} d1=${budget.queries} (limits ${budget.maxSubrequests} / d1 ${budget.maxQueries})`);
+    console.log(`gmail ingest ${src.address}: mode=${mode} ${detail}; processed ${processed} threads, ${cursor.pending.length} pending; subrequests fetch=${budget.fetches} d1=${budget.queries} (limits ${budget.maxSubrequests} / d1 ${budget.maxQueries})${budget.pastDeadline ? '; stopped at the run deadline' : ''}`);
   }
+  return summary;
 }
 
 /** Fetch one Gmail thread and write it to its thread row. */
 async function syncGmailThread(
-  env: Env, src: { id: string; brand_id: string; address: string }, auth: Record<string, string>,
+  env: IngestEnv, src: { id: string; brand_id: string; address: string }, auth: Record<string, string>,
   threadId: string, exemptions: Exemptions, budget: Budget,
 ) {
   const res = await budget.fetch(`${GMAIL}threads/${threadId}?format=metadata`, { headers: auth });

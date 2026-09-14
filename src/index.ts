@@ -1,14 +1,13 @@
 /**
  * InHouse / THI support console — Cloudflare Worker
  *
- * Serves the dashboard, exposes the API, and runs ingest on a cron.
- * No dependency on any AI provider: if every subscription lapses, this
- * keeps polling Gmail and Quo and keeps serving the board.
+ * Serves the dashboard, the API and the Quo webhook. Ingest does not run here:
+ * it runs hourly on GitHub Actions (scripts/ingest.mjs) and writes to the same
+ * D1 database over the REST API. No dependency on any AI provider.
  */
 
-import { ingestGmail } from './ingest/gmail.ts';
-import { ingestQuo } from './ingest/quo.ts';
 import { rescueThread, responseInsert } from './db/threads.ts';
+import type { Db } from './db/db.ts';
 import { listFailures } from './db/failures.ts';
 import { verifyQuoWebhook, webhookHeaders } from './lib/quo-signature.ts';
 
@@ -17,13 +16,7 @@ export interface Env {
   ACCESS_AUD: string;      // Cloudflare Access application audience tag
   ACCESS_TEAM: string;     // e.g. "inhouse" for inhouse.cloudflareaccess.com
   OWNERS: string;          // comma-separated emails that get the owner view
-  /** Service-account key JSON (domain-wide delegation, gmail.readonly). A secret; Workers have no filesystem. */
-  GOOGLE_SERVICE_ACCOUNT_JSON: string;
-  QUO_API_KEY: string;
-  QUO_WEBHOOK_SECRET: string;
-  /** Optional per-invocation ingest budget overrides. Workers Paid is required; see CLAUDE.md "Hosting cost". */
-  INGEST_MAX_SUBREQUESTS?: string;
-  INGEST_MAX_D1_QUERIES?: string;
+  QUO_WEBHOOK_SECRET: string;    // whsec_... signing key returned when the webhook is created (Standard Webhooks)
   ASSETS: Fetcher;
 }
 
@@ -37,9 +30,6 @@ const json = (data: unknown, status = 200) =>
 
 const now = () => Math.floor(Date.now() / 1000);
 
-/** Must match [triggers] crons in wrangler.toml. */
-export const GMAIL_CRON = '*/5 * * * *';
-export const QUO_CRON = '2-59/5 * * * *';
 
 /**
  * Action kinds that reach the customer. Logging one always records contact
@@ -252,8 +242,10 @@ export default {
       if (!b.thread_id || !b.kind) return json({ error: 'thread_id and kind required' }, 400);
 
       const at = now();
+      // Typed as Db: the binding satisfies the same interface ingest uses over HTTP.
+      const db: Db = env.DB;
       const batch = [
-        env.DB.prepare(
+        db.prepare(
           `INSERT INTO action (thread_id, actor, kind, body, created_at)
            VALUES (?1, ?2, ?3, ?4, ?5)`
         ).bind(b.thread_id, user.email, b.kind, b.body ?? null, at),
@@ -312,7 +304,7 @@ export default {
           )
         );
       }
-      await env.DB.batch(batch);
+      await db.batch(batch);
       return json({ ok: true });
     }
 
@@ -348,16 +340,6 @@ export default {
     }
 
     return json({ error: 'No such route' }, 404);
-  },
-
-  /**
-   * Separate cron triggers (wrangler.toml), so Gmail and Quo each get a whole
-   * invocation's subrequest budget instead of sharing one.
-   */
-  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    if (event.cron === GMAIL_CRON) ctx.waitUntil(ingestGmail(env));
-    else if (event.cron === QUO_CRON) ctx.waitUntil(ingestQuo(env));
-    else console.warn(`scheduled: no ingest is wired to cron "${event.cron}"`);
   },
 };
 

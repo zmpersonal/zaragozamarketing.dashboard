@@ -29,7 +29,7 @@
  * A Budget (lib/budget.ts) counts every fetch and D1 statement; a
  * conversation that doesn't fit what is left waits for the next run.
  */
-import type { Env } from '../index.ts';
+import type { IngestEnv } from '../db/db.ts';
 import type { Observed } from '../lib/thread-state.ts';
 import { syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure, SKIP_AFTER_FAILURES } from '../db/failures.ts';
@@ -38,18 +38,23 @@ import { Budget } from '../lib/budget.ts';
 const API = 'https://api.quo.com/v1/';
 const PAGE = '100';
 
+/**
+ * Per-run caps, sized for an hourly GitHub Actions run (round 9); see GMAIL_LIMITS.
+ * Quo's API allows 10 requests per second; ingest reads sequentially.
+ */
 export const QUO_LIMITS = {
-  /** conversations read per source per run */
-  conversationsPerRun: 20,
+  /** conversations read per source per run (below one 100-conversation listing page) */
+  conversationsPerRun: 80,
   /** conversation listing pages per source per run (up to 100 each) */
-  listPagesPerRun: 2,
-  /** pages of messages, and of calls, one conversation may read; more is recorded as a failure */
-  pagesPerConversation: 3,
+  listPagesPerRun: 5,
+  /** pages of messages, and of calls, one conversation may read (100 each); more is recorded as a failure */
+  pagesPerConversation: 10,
   /** cap on conversations queued in the cursor */
-  maxPending: 500,
-  /** per invocation, all sources. Workers Paid allows 10,000 subrequests and 1,000 D1 queries. */
-  maxSubrequests: 900,
-  maxD1Queries: 900,
+  maxPending: 2000,
+  /** per run, all sources: fetches + D1 statements */
+  maxSubrequests: 2000,
+  /** per run, all sources. With Gmail's 600, under Cloudflare's 1,200 API requests per 5 minutes. */
+  maxD1Queries: 400,
 };
 
 /**
@@ -68,7 +73,7 @@ const secs = (isoDate: string) => Math.floor(Date.parse(isoDate) / 1000);
 const isoOf = (unix: number) => new Date(unix * 1000).toISOString();
 
 /** The only credential these helpers need, so prove/quo.mjs can reuse them outside the Worker. */
-type QuoAuth = Pick<Env, 'QUO_API_KEY'>;
+type QuoAuth = Pick<IngestEnv, 'QUO_API_KEY'>;
 
 export interface QuoPhoneNumber { id: string; number: string; name?: string | null }
 export interface QuoConversation {
@@ -87,7 +92,7 @@ type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 async function quo<T>(env: QuoAuth, path: string, params: [string, string][], fetchImpl: Fetch = fetch): Promise<{ data: T[]; nextPageToken?: string | null }> {
   const url = new URL(API + path);
   for (const [k, v] of params) url.searchParams.append(k, v);
-  const res = await fetchImpl(url, { headers: { Authorization: env.QUO_API_KEY } });
+  const res = await fetchImpl(url, { headers: { Authorization: env.QUO_API_KEY ?? '' } });
   if (!res.ok) throw new Error(`Quo ${path} -> ${res.status}`);
   return res.json();
 }
@@ -190,11 +195,25 @@ function parseCursor(raw: string | null): QuoCursor {
 
 class DeferConversation extends Error {}
 
-export async function ingestQuo(env: Env, budget: Budget = Budget.from(env, QUO_LIMITS)) {
+export interface IngestSummary {
+  /** Sources that could not be read at all this run (auth, listing, database). */
+  failedSources: string[];
+  /** Items (conversations) that failed and were recorded in ingest_failure. */
+  failedItems: number;
+  processed: number;
+}
+
+export async function ingestQuo(env: IngestEnv, budget: Budget = Budget.from(env, QUO_LIMITS)): Promise<IngestSummary> {
+  const summary: IngestSummary = { failedSources: [], failedItems: 0, processed: 0 };
   const db = budget.wrap(env.DB);
   const benv = { ...env, DB: db };
   const { results: sources } = await db
     .prepare(`SELECT * FROM source WHERE provider = 'quo'`).all<any>();
+  if (sources.length && !env.QUO_API_KEY) {
+    console.error('quo ingest skipped: QUO_API_KEY is not set');
+    summary.failedSources = sources.map((s: any) => s.address);
+    return summary;
+  }
 
   for (const src of sources) {
     // Room for this source's listing and its cursor write.
@@ -261,6 +280,7 @@ export async function ingestQuo(env: Env, budget: Budget = Budget.from(env, QUO_
           // One failing conversation is logged and skipped; the others still sync.
           // It holds the cursor (retried by the next scan) until SKIP_AFTER_FAILURES,
           // then is skipped; the record stays in ingest_failure for a human.
+          summary.failedItems++;
           const { failures, skipped } = await recordFailure(db, src.id, itemId, err, now);
           if (skipped) {
             console.error(`quo ingest skipping conversation ${c.id} on ${src.address} after ${failures} failures (limit ${SKIP_AFTER_FAILURES}); see ingest_failure`, err);
@@ -271,6 +291,7 @@ export async function ingestQuo(env: Env, budget: Budget = Budget.from(env, QUO_
         }
         scan.pending.shift();
         processed++;
+        summary.processed++;
       }
 
       if (cursor.scan && scan.listingDone && !scan.pending.length) {
@@ -280,18 +301,20 @@ export async function ingestQuo(env: Env, budget: Budget = Budget.from(env, QUO_
     } catch (err) {
       // Listing failed: this source is skipped this run and its cursor is not touched.
       console.error(`quo ingest failed for ${src.address}`, err);
+      summary.failedSources.push(src.address);
       continue;
     }
 
     await db.prepare(`UPDATE source SET last_synced_at = ?2, sync_cursor = ?3 WHERE id = ?1`)
       .bind(src.id, now, JSON.stringify(cursor)).run();
-    console.log(`quo ingest ${src.address}: mode=${mode}; processed ${processed} conversations, ${cursor.scan?.pending.length ?? 0} pending; subrequests fetch=${budget.fetches} d1=${budget.queries} (limits ${budget.maxSubrequests} / d1 ${budget.maxQueries})`);
+    console.log(`quo ingest ${src.address}: mode=${mode}; processed ${processed} conversations, ${cursor.scan?.pending.length ?? 0} pending; subrequests fetch=${budget.fetches} d1=${budget.queries} (limits ${budget.maxSubrequests} / d1 ${budget.maxQueries})${budget.pastDeadline ? '; stopped at the run deadline' : ''}`);
   }
+  return summary;
 }
 
 /** Write one conversation's observed timeline to its thread. */
 async function syncConversation(
-  env: Env, src: { id: string; brand_id: string }, c: QuoConversation,
+  env: IngestEnv, src: { id: string; brand_id: string }, c: QuoConversation,
   messages: QuoMessage[], timeline: Observed[], now: number,
 ) {
   const newest = (inbound: boolean): number | null => {
