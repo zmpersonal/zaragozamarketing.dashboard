@@ -12,6 +12,8 @@ const MIN = 60;
 
 const thread = (env, cn = 'CN1') => env.DB.prepare('SELECT * FROM thread WHERE id = ?1').bind(`quo:${cn}`).first();
 const source = (env) => env.DB.prepare('SELECT * FROM source WHERE id = ?1').bind(SOURCE_ID).first();
+/** High-water mark: when the last fully-read scan started (round 8; was the newest event seen). */
+const highWater = async (env) => JSON.parse((await source(env)).sync_cursor ?? '{"highWater":null}').highWater;
 const close = (env, cn, at) =>
   env.DB.prepare(`UPDATE thread SET status = 'closed', closed_at = ?2, awaiting_since = NULL WHERE id = ?1`).bind(`quo:${cn}`, at).run();
 
@@ -94,8 +96,7 @@ test('the cursor is stored per source and the next poll reads messages after it'
   const { env, account } = setup();
   account.text('CN1', T0, 'incoming');
   await poll(env, account, T0 + 5 * MIN);
-  const cursor = (await source(env)).sync_cursor;
-  assert.equal(cursor, String(T0), 'cursor = newest activity observed');
+  assert.equal(await highWater(env), T0 + 5 * MIN, 'cursor = when the completed read started');
 
   account.requests.length = 0;
   account.text('CN1', T0 + 10 * MIN, 'outgoing');
@@ -105,7 +106,7 @@ test('the cursor is stored per source and the next poll reads messages after it'
   assert.equal(messageRequests.length, 1);
   const createdAfter = Date.parse(messageRequests[0].searchParams.get('createdAfter')) / 1000;
   assert.ok(createdAfter <= T0 && createdAfter >= T0 - 10 * MIN, `reads from the cursor with a small overlap (${createdAfter})`);
-  assert.equal((await source(env)).sync_cursor, String(T0 + 10 * MIN));
+  assert.equal(await highWater(env), T0 + 15 * MIN);
 });
 
 test('conversations with no activity since the cursor are not re-read', async () => {
@@ -153,7 +154,7 @@ test('one failing conversation: the others still sync, and the cursor does not a
 
   assert.equal(await thread(env, 'CN1'), null);
   assert.ok(await thread(env, 'CN2'), 'CN2 still synced');
-  assert.equal((await source(env)).sync_cursor, null, 'cursor held so CN1 is retried');
+  assert.equal(await highWater(env), null, 'cursor held so CN1 is retried');
   assert.ok(errors.some((e) => e.includes('CN1')), errors.join('\n'));
 
   account.fail.delete('CN1');

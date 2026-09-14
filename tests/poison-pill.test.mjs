@@ -23,7 +23,8 @@ const pollAt = (env, account, nowSec) => quiet(async () => {
   const real = Date.now; Date.now = () => nowSec * 1000;
   try { await withQuo(account, () => ingestQuo(env)); } finally { Date.now = real; }
 });
-const cursor = async (env) => (await env.DB.prepare('SELECT sync_cursor FROM source WHERE id = ?1').bind(SOURCE_ID).first()).sync_cursor;
+// The cursor's high-water mark: when the last fully-read scan started (null = never completed).
+const cursor = async (env) => JSON.parse((await env.DB.prepare('SELECT sync_cursor FROM source WHERE id = ?1').bind(SOURCE_ID).first()).sync_cursor ?? '{"highWater":null}').highWater;
 const failures = async (env) => (await env.DB.prepare('SELECT * FROM ingest_failure ORDER BY item_id').all()).results;
 const thread = (env, cn) => env.DB.prepare('SELECT * FROM thread WHERE id = ?1').bind(`quo:${cn}`).first();
 
@@ -51,7 +52,7 @@ test('a conversation that keeps failing is skipped after 3 polls and the cursor 
 
   account.text('CN-OK', T0 + 30 * MIN, 'incoming');
   const logs = await pollAt(env, account, T0 + 31 * MIN);
-  assert.equal(await cursor(env), String(T0 + 30 * MIN), 'poll 3: skipped past the poison record');
+  assert.equal(await cursor(env), T0 + 31 * MIN, 'poll 3: skipped past the poison record');
   const [f] = await failures(env);
   assert.equal(f.source_id, SOURCE_ID);
   assert.equal(f.item_id, 'quo:CN-BAD');
@@ -63,7 +64,7 @@ test('a conversation that keeps failing is skipped after 3 polls and the cursor 
   // Ingest carries on: new activity is picked up and the cursor keeps advancing.
   account.text('CN-OK', T0 + 40 * MIN, 'incoming');
   await pollAt(env, account, T0 + 41 * MIN);
-  assert.equal(await cursor(env), String(T0 + 40 * MIN));
+  assert.equal(await cursor(env), T0 + 41 * MIN);
   assert.equal((await thread(env, 'CN-OK')).last_inbound_at, T0 + 40 * MIN);
 });
 
@@ -76,7 +77,7 @@ test('a conversation that recovers before the limit is cleared from the failure 
   await pollAt(env, account, T0 + 2 * MIN);
   assert.deepEqual(await failures(env), []);
   assert.ok(await thread(env, 'CN-BAD'));
-  assert.equal(await cursor(env), String(T0));
+  assert.equal(await cursor(env), T0 + 2 * MIN);
 });
 
 test('skipped and failing records are visible on the board', async () => {

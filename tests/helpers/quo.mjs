@@ -60,8 +60,20 @@ export function makeQuoAccount() {
 const after = (items, createdAfter) =>
   createdAfter ? items.filter((x) => Date.parse(x.createdAt) > Date.parse(createdAfter)) : items;
 
-/** Run fn with fetch answering from `account`. */
-export async function withQuo(account, fn) {
+/** One page of `items`: honours maxResults (capped by opts.pageSize) and an offset pageToken. */
+function paged(items, q, pageSize) {
+  const size = Math.min(pageSize, Number(q.get('maxResults')));
+  const start = Number(q.get('pageToken') ?? 0);
+  const next = start + size < items.length ? String(start + size) : null;
+  return { data: items.slice(start, start + size), nextPageToken: next };
+}
+
+/**
+ * Run fn with fetch answering from `account`.
+ * opts.pageSize caps every page (real Quo pages are up to 100), so paging is exercised.
+ * account.failListingPageToken makes a conversations request that carries a pageToken fail.
+ */
+export async function withQuo(account, fn, { pageSize = 100 } = {}) {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input.url ?? String(input));
@@ -80,7 +92,8 @@ export async function withQuo(account, fn) {
     }
     if (url.pathname === '/v1/conversations') {
       if (!q.get('maxResults')) return new Response('maxResults required', { status: 400 });
-      return ok({ data: byActivity, nextPageToken: null });
+      if (account.failListingPageToken && q.get('pageToken')) return new Response('page token expired', { status: 400 });
+      return ok(paged(byActivity, q, pageSize));
     }
     if (url.pathname === '/v1/messages' || url.pathname === '/v1/calls') {
       const participants = q.getAll('participants');
@@ -91,7 +104,7 @@ export async function withQuo(account, fn) {
         account.conversations[id].participants.join() === participants.join());
       if (account.fail.has(cn)) return new Response('boom', { status: 500 });
       const store = url.pathname === '/v1/messages' ? account.messages : account.calls;
-      return ok({ data: after(store[cn] ?? [], q.get('createdAfter')), nextPageToken: null });
+      return ok(paged(after(store[cn] ?? [], q.get('createdAfter')), q, pageSize));
     }
 
     // What the pre-round-3 ingest called (not a documented v1 path).

@@ -13,14 +13,52 @@
  *   GET /v1/messages       phoneNumberId, participants[] (required), createdAfter
  *   GET /v1/calls          phoneNumberId, participants (max 1), createdAfter
  * Auth is the raw key in Authorization (no Bearer).
+ *
+ * Bounded per run, like Gmail (round 8). source.sync_cursor holds JSON
+ * {highWater, scan}:
+ *   - highWater: unix seconds; everything created before it (less a small
+ *     overlap) has been read. null until the first scan completes, so the
+ *     first scan reads 30 days back.
+ *   - scan: the read in progress, {since, startedAt, pageToken, listingDone,
+ *     pending, anyFailed}. Each run lists at most QUO_LIMITS.listPagesPerRun
+ *     pages of conversations and reads at most conversationsPerRun of them.
+ *     When the scan completes with nothing held for retry, highWater becomes
+ *     the scan's START time, not the newest event seen: a conversation read
+ *     early in a scan that spans runs can get new activity older than events
+ *     read later.
+ * A Budget (lib/budget.ts) counts every fetch and D1 statement; a
+ * conversation that doesn't fit what is left waits for the next run.
  */
 import type { Env } from '../index.ts';
 import type { Observed } from '../lib/thread-state.ts';
 import { syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure, SKIP_AFTER_FAILURES } from '../db/failures.ts';
+import { Budget } from '../lib/budget.ts';
 
 const API = 'https://api.quo.com/v1/';
 const PAGE = '100';
+
+export const QUO_LIMITS = {
+  /** conversations read per source per run */
+  conversationsPerRun: 20,
+  /** conversation listing pages per source per run (up to 100 each) */
+  listPagesPerRun: 2,
+  /** pages of messages, and of calls, one conversation may read; more is recorded as a failure */
+  pagesPerConversation: 3,
+  /** cap on conversations queued in the cursor */
+  maxPending: 500,
+  /** per invocation, all sources. Workers Paid allows 10,000 subrequests and 1,000 D1 queries. */
+  maxSubrequests: 900,
+  maxD1Queries: 900,
+};
+
+/**
+ * Worst-case D1 statements to sync one conversation before its waits are known:
+ * syncThread SELECT + INSERT/UPDATE + reopen/unblock log, clearFailure, and
+ * recordFailure's 2 if it fails. Each completed wait adds one response row.
+ */
+const CONVERSATION_QUERIES = 6;
+const CONVERSATION_FETCHES = 2 * QUO_LIMITS.pagesPerConversation;
 /** First poll for a source reads this far back. Matches Gmail's 30-day window. */
 const BACKFILL_SECONDS = 30 * 86400;
 /** Re-read a little before the cursor, for items indexed late. Re-reads are idempotent. */
@@ -44,25 +82,34 @@ export interface QuoConversation {
 export interface QuoMessage { direction: 'incoming' | 'outgoing'; status?: string; createdAt: string; text?: string }
 export interface QuoCall { direction: 'incoming' | 'outgoing'; createdAt: string; answeredAt?: string | null }
 
-async function quo<T>(env: QuoAuth, path: string, params: [string, string][]): Promise<{ data: T[]; nextPageToken?: string | null }> {
+type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+async function quo<T>(env: QuoAuth, path: string, params: [string, string][], fetchImpl: Fetch = fetch): Promise<{ data: T[]; nextPageToken?: string | null }> {
   const url = new URL(API + path);
   for (const [k, v] of params) url.searchParams.append(k, v);
-  const res = await fetch(url, { headers: { Authorization: env.QUO_API_KEY } });
+  const res = await fetchImpl(url, { headers: { Authorization: env.QUO_API_KEY } });
   if (!res.ok) throw new Error(`Quo ${path} -> ${res.status}`);
   return res.json();
 }
 
-/** Every page of a list endpoint. */
-async function all<T>(env: QuoAuth, path: string, params: [string, string][]): Promise<T[]> {
+/** Every page of a list endpoint, or at most maxPages (then it throws rather than return a partial list). */
+async function all<T>(env: QuoAuth, path: string, params: [string, string][], opts: ReadOptions = {}): Promise<T[]> {
   const out: T[] = [];
   let pageToken: string | null | undefined;
+  let pages = 0;
   do {
-    const page = await quo<T>(env, path, pageToken ? [...params, ['pageToken', pageToken]] : params);
+    if (opts.maxPages !== undefined && pages === opts.maxPages) {
+      throw new Error(`Quo ${path}: more than ${opts.maxPages} pages for one conversation; not read this run`);
+    }
+    const page = await quo<T>(env, path, pageToken ? [...params, ['pageToken', pageToken]] : params, opts.fetch);
     out.push(...page.data);
     pageToken = page.nextPageToken;
+    pages++;
   } while (pageToken);
   return out;
 }
+
+interface ReadOptions { fetch?: Fetch; maxPages?: number }
 
 export const listPhoneNumbers = (env: QuoAuth) => all<QuoPhoneNumber>(env, 'phone-numbers', []);
 
@@ -107,65 +154,138 @@ export function toTimeline(messages: QuoMessage[], calls: QuoCall[]): Observed[]
 }
 
 /** Every message and call in one conversation created after `since`, as a timeline. */
-export async function readConversation(env: QuoAuth, c: QuoConversation, since: number) {
+export async function readConversation(env: QuoAuth, c: QuoConversation, since: number, opts: ReadOptions = {}) {
   const base: [string, string][] = [
     ['phoneNumberId', c.phoneNumberId],
     ...c.participants.map((p): [string, string] => ['participants', p]),
     ['createdAfter', isoOf(since)],
     ['maxResults', PAGE],
   ];
-  const messages = await all<QuoMessage>(env, 'messages', base);
+  const messages = await all<QuoMessage>(env, 'messages', base, opts);
   // The calls endpoint accepts a single participant, so group threads have no call history.
-  const calls = c.participants.length === 1 ? await all<QuoCall>(env, 'calls', base) : [];
+  const calls = c.participants.length === 1 ? await all<QuoCall>(env, 'calls', base, opts) : [];
   return { messages, calls, timeline: toTimeline(messages, calls) };
 }
 
-export async function ingestQuo(env: Env) {
-  const { results: sources } = await env.DB
+interface Scan {
+  since: number;
+  startedAt: number;
+  pageToken: string | null;
+  listingDone: boolean;
+  pending: QuoConversation[];
+  anyFailed: boolean;
+}
+interface QuoCursor { highWater: number | null; scan: Scan | null }
+
+function parseCursor(raw: string | null): QuoCursor {
+  if (!raw) return { highWater: null, scan: null };
+  if (/^\d+$/.test(raw)) return { highWater: Number(raw), scan: null }; // pre-round-8 cursor
+  try {
+    const c = JSON.parse(raw);
+    return { highWater: typeof c.highWater === 'number' ? c.highWater : null, scan: c.scan && typeof c.scan.since === 'number' ? c.scan : null };
+  } catch {
+    return { highWater: null, scan: null };
+  }
+}
+
+class DeferConversation extends Error {}
+
+export async function ingestQuo(env: Env, budget: Budget = Budget.from(env, QUO_LIMITS)) {
+  const db = budget.wrap(env.DB);
+  const benv = { ...env, DB: db };
+  const { results: sources } = await db
     .prepare(`SELECT * FROM source WHERE provider = 'quo'`).all<any>();
 
   for (const src of sources) {
+    // Room for this source's listing and its cursor write.
+    if (!budget.canAfford(QUO_LIMITS.listPagesPerRun, 1)) {
+      console.warn(`quo ingest ${src.address}: budget exhausted before this source; it runs next time`);
+      break;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const cursor = parseCursor(src.sync_cursor);
+    let mode = 'continue';
+    let processed = 0;
     try {
-      const now = Math.floor(Date.now() / 1000);
-      const cursor: number | null = src.sync_cursor ? Number(src.sync_cursor) : null;
-      const since = (cursor ?? now - BACKFILL_SECONDS) - OVERLAP_SECONDS;
+      if (!cursor.scan) {
+        mode = cursor.highWater === null ? 'backfill' : 'incremental';
+        cursor.scan = {
+          since: (cursor.highWater ?? now - BACKFILL_SECONDS) - OVERLAP_SECONDS,
+          startedAt: now, pageToken: null, listingDone: false, pending: [], anyFailed: false,
+        };
+      }
+      const scan = cursor.scan;
 
-      let highWater = cursor;
-      let anyFailed = false;
-
-      for (const c of await activeConversations(env, src.address, since)) {
-        // One failing conversation is logged and skipped; the others still sync.
+      // List: newest activity first, stopping at the first conversation older than the scan.
+      for (let pages = 0; !scan.listingDone && pages < QUO_LIMITS.listPagesPerRun
+        && scan.pending.length < QUO_LIMITS.conversationsPerRun && scan.pending.length < QUO_LIMITS.maxPending; pages++) {
+        const params: [string, string][] = [['phoneNumbers', src.address], ['maxResults', PAGE]];
+        if (scan.pageToken) params.push(['pageToken', scan.pageToken]);
+        let page;
         try {
-          const { messages, timeline } = await readConversation(env, c, since);
-          if (timeline.length) await syncConversation(env, src, c, messages, timeline, now);
-          await clearFailure(env.DB, src.id, `quo:${c.id}`);
-
-          if (timeline.length) {
-            const last = timeline[timeline.length - 1].at;
-            highWater = highWater === null ? last : Math.max(highWater, last);
-          }
+          page = await quo<QuoConversation>(env, 'conversations', params, budget.fetch);
         } catch (err) {
-          // A conversation that keeps failing must not hold the cursor back
-          // forever. Hold it (retry next poll) until SKIP_AFTER_FAILURES, then
-          // skip past it; the record stays in ingest_failure for a human.
-          const { failures, skipped } = await recordFailure(env.DB, src.id, `quo:${c.id}`, err, now);
+          if (!scan.pageToken) throw err;
+          // A stored page token Quo no longer accepts: start the scan again next run, cursor unchanged.
+          console.warn(`quo ingest ${src.address}: listing page token rejected (${(err as Error).message}); restarting the scan next run`);
+          cursor.scan = null;
+          break;
+        }
+        for (const c of page.data) {
+          if (secs(c.lastActivityAt ?? c.createdAt) < scan.since) { scan.listingDone = true; break; }
+          if (!scan.pending.some((p) => p.id === c.id)) {
+            scan.pending.push({ id: c.id, phoneNumberId: c.phoneNumberId, participants: c.participants, name: c.name ?? null, createdAt: c.createdAt, lastActivityAt: c.lastActivityAt ?? null });
+          }
+        }
+        scan.pageToken = page.nextPageToken ?? null;
+        if (!scan.pageToken) scan.listingDone = true;
+      }
+
+      while (cursor.scan && scan.pending.length && processed < QUO_LIMITS.conversationsPerRun) {
+        // Reserve this conversation's worst-case reads and base writes, plus the cursor write.
+        if (!budget.canAfford(CONVERSATION_FETCHES, CONVERSATION_QUERIES + 1)) break;
+        const c = scan.pending[0];
+        const itemId = `quo:${c.id}`;
+        try {
+          const { messages, timeline } = await readConversation(env, c, scan.since, { fetch: budget.fetch, maxPages: QUO_LIMITS.pagesPerConversation });
+          // Each outbound can end a wait and add a response row.
+          const writes = CONVERSATION_QUERIES + timeline.filter((e) => !e.inbound).length + 1;
+          if (writes > budget.maxQueries || writes > budget.maxSubrequests) {
+            throw new Error(`needs ${writes} D1 queries, more than one run allows`);
+          }
+          if (!budget.canAfford(0, writes)) throw new DeferConversation();
+          if (timeline.length) await syncConversation(benv, src, c, messages, timeline, now);
+          await clearFailure(db, src.id, itemId);
+        } catch (err) {
+          if (err instanceof DeferConversation) break; // stays first in line for the next run
+          // One failing conversation is logged and skipped; the others still sync.
+          // It holds the cursor (retried by the next scan) until SKIP_AFTER_FAILURES,
+          // then is skipped; the record stays in ingest_failure for a human.
+          const { failures, skipped } = await recordFailure(db, src.id, itemId, err, now);
           if (skipped) {
             console.error(`quo ingest skipping conversation ${c.id} on ${src.address} after ${failures} failures (limit ${SKIP_AFTER_FAILURES}); see ingest_failure`, err);
           } else {
-            anyFailed = true;
+            scan.anyFailed = true;
             console.error(`quo ingest skipped conversation ${c.id} on ${src.address} (failure ${failures} of ${SKIP_AFTER_FAILURES}); will retry`, err);
           }
         }
+        scan.pending.shift();
+        processed++;
       }
 
-      // Advance the cursor unless a conversation failed and is still being
-      // retried. Otherwise hold it, so that conversation is read again next poll.
-      await env.DB.prepare(
-        `UPDATE source SET last_synced_at = ?2, sync_cursor = CASE WHEN ?3 THEN sync_cursor ELSE ?4 END WHERE id = ?1`
-      ).bind(src.id, now, anyFailed ? 1 : 0, highWater === null ? null : String(highWater)).run();
+      if (cursor.scan && scan.listingDone && !scan.pending.length) {
+        if (!scan.anyFailed) cursor.highWater = scan.startedAt;
+        cursor.scan = null;
+      }
     } catch (err) {
+      // Listing failed: this source is skipped this run and its cursor is not touched.
       console.error(`quo ingest failed for ${src.address}`, err);
+      continue;
     }
+
+    await db.prepare(`UPDATE source SET last_synced_at = ?2, sync_cursor = ?3 WHERE id = ?1`)
+      .bind(src.id, now, JSON.stringify(cursor)).run();
+    console.log(`quo ingest ${src.address}: mode=${mode}; processed ${processed} conversations, ${cursor.scan?.pending.length ?? 0} pending; subrequests fetch=${budget.fetches} d1=${budget.queries} (limits ${budget.maxSubrequests} / d1 ${budget.maxQueries})`);
   }
 }
 
