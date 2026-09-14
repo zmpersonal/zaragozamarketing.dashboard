@@ -345,12 +345,28 @@ the free tier.
 - **Worst case, bounded:** the job timeout is 2 minutes, so even if every run hit it the month
   would bill 1,460 minutes (73%). One job only; a second job would add a billed minute per run.
 
-**Keepalive.** GitHub disables scheduled workflows after 60 days without a commit, silently (it's
-documented for public repos, and reported for private ones). The workflow's first step pushes an
-empty commit to the default branch when the last commit is 45+ days old, using the workflow's own
-token (`contents: write`, the only permission granted). **This means the workflow itself commits
-to `main` roughly every 45 days on a quiet repo.** Owner-requested; noted because it's the only
-automated write to the repository.
+**Keepalive (round 10: API, no commits).** GitHub disables scheduled workflows after 60 days of
+repository inactivity, silently. GitHub documents this for public repos and doesn't define
+"activity"; it's reported on private repos too.
+- **Round 9 pushed an empty commit to the default branch after 45 quiet days. That broke the
+  never-push-to-main rule through our own machinery, and round 10 removed it.** The workflow now
+  never commits or pushes anywhere, and a test fails if `git commit`, `git push` or
+  `contents: write` appears in it.
+- **Approach used:** every scheduled run first calls
+  `PUT /repos/{owner}/{repo}/actions/workflows/ingest.yml/enable` with the workflow's own token
+  (`actions: write`; the only other permission is `contents: read`).
+  - Re-enabling restarts the inactivity clock, so a workflow re-enabled every hour never reaches
+    60 days.
+  - This is how liskin/gh-workflow-keepalive works, and the default mode of keepalive-workflow v2,
+    which replaced its own dummy commits with it.
+- **Why not a keepalive branch:** there's no evidence that a push to a non-default branch counts
+  as activity, and it would still be the workflow writing to the repo.
+- **Unproven, and can't be proven quickly:** GitHub doesn't document that the enable call resets
+  the clock. The evidence is those widely used actions. If a failed call happens, it shows as a
+  `::warning title=keepalive::` on the run.
+- **If the schedule ever does stop,** runs simply stop appearing. The dashboard doesn't yet warn
+  when ingest is stale. A "last synced N hours ago" warning would make a silent stop visible;
+  not built.
 
 **Unverified until the first real run:**
 - **D1 REST parameter types.** The published API schema lists `params` as strings. If the API

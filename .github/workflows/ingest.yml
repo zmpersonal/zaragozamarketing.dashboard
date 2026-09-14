@@ -18,7 +18,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # keepalive only: an empty commit after 45 quiet days
+  contents: read  # check out the code
+  actions: write  # keepalive: re-enable this workflow through the API (no commits)
 
 concurrency:
   group: ingest
@@ -33,25 +34,25 @@ jobs:
         with:
           persist-credentials: false
 
-      # GitHub disables scheduled workflows after 60 days without a commit, silently.
+      # GitHub disables scheduled workflows after 60 days of repository inactivity, silently.
+      # Instead of committing (this workflow never commits or pushes, to main or anywhere),
+      # re-enable it through the API on every scheduled run, which restarts the 60-day clock.
+      # This is the approach of liskin/gh-workflow-keepalive and keepalive-workflow v2's
+      # default mode; GitHub doesn't document what counts as activity. See HANDOFF.
       # Runs first, so a failing or timed-out ingest can't skip it.
       - name: Keepalive
         if: github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -eu
-          last=$(git log -1 --format=%ct)
-          quiet_days=$(( ($(date +%s) - last) / 86400 ))
-          if [ "$quiet_days" -lt 45 ]; then
-            echo "keepalive: last commit ${quiet_days} days ago, nothing to do"
-            exit 0
+          set -u
+          workflow="${GITHUB_WORKFLOW_REF%%@*}"
+          workflow="${workflow#"${GITHUB_REPOSITORY}"/.github/workflows/}"
+          if gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/enable" >/dev/null 2>&1; then
+            echo "keepalive: re-enabled ${workflow} through the API"
+          else
+            echo "::warning title=keepalive::could not re-enable ${workflow} through the API; the schedule may be disabled after 60 quiet days"
           fi
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit --allow-empty -q -m "chore: keepalive for scheduled ingest (repo quiet ${quiet_days} days)"
-          remote="${KEEPALIVE_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
-          git push -q "$remote" "HEAD:${GITHUB_REF_NAME}" 2>&1 | sed "s#${GH_TOKEN}#***#g"
-          echo "keepalive: pushed an empty commit after ${quiet_days} quiet days"
 
       - uses: actions/setup-node@v4
         with:

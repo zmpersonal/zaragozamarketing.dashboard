@@ -46,10 +46,14 @@ test('secrets reach the ingest step only as environment variables, and are never
 });
 
 test('least privilege, no overlapping runs, official actions only', () => {
-  const perms = YML.match(/^permissions:\n((?:\s{2}.+\n)+)/m)?.[1].trim().split('\n').map((l) => l.trim());
-  assert.deepEqual(perms, ['contents: write  # keepalive only: an empty commit after 45 quiet days']);
+  const perms = YML.match(/^permissions:\n((?:\s{2}.+\n)+)/m)?.[1].trim().split('\n').map((l) => l.replace(/\s*#.*$/, '').trim());
+  assert.deepEqual(perms, ['contents: read', 'actions: write'], 'read the code; re-enable this workflow; nothing else');
   assert.match(YML, /^concurrency:\n\s+group: ingest\n\s+cancel-in-progress: false/m);
   for (const m of YML.matchAll(/uses: ([^@\s]+)@/g)) assert.match(m[1], /^actions\//, m[1]);
+});
+
+test('the workflow never commits or pushes: our machinery follows the never-push-to-main rule too', () => {
+  assert.doesNotMatch(YML, /git\s+(commit|push)|contents:\s*write|x-access-token/);
 });
 
 // --- keepalive ------------------------------------------------------------------------------
@@ -64,36 +68,37 @@ function keepaliveScript() {
   return { step: lines.slice(start, runAt).join('\n'), script: body.join('\n') };
 }
 
-function repoQuietFor(days) {
-  const dir = mkdtempSync(join(tmpdir(), 'keepalive-'));
-  const git = (args, cwd, env = {}) => spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...env } });
-  git(['init', '-q', '--bare', 'remote.git'], dir);
-  git(['clone', '-q', 'remote.git', 'work'], dir);
-  const work = join(dir, 'work');
-  writeFileSync(join(work, 'f'), 'x');
-  git(['add', 'f'], work);
-  const when = new Date(Date.now() - days * 86400_000).toISOString();
-  git(['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'old'], work, { GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when });
-  git(['push', '-q', 'origin', 'HEAD:main'], work);
-  return { dir, work, count: () => git(['rev-list', '--count', 'main'], join(dir, 'remote.git')).stdout.trim() };
-}
-
-test('keepalive only runs on the schedule, before ingest, so a failed or timed-out ingest cannot skip it', () => {
+test('keepalive runs on the schedule only, before ingest, so a failed or timed-out ingest cannot skip it', () => {
   const { step } = keepaliveScript();
   assert.match(step, /if: github\.event_name == 'schedule'/);
   assert.ok(lines.findIndex((l) => /name: Keepalive/.test(l)) < lines.findIndex((l) => /run: node scripts\/ingest\.mjs/.test(l)));
 });
 
-test('keepalive: a repo quiet for 45+ days gets one empty commit pushed; a recently active one is left alone; the token is not printed', () => {
+/** Run the keepalive script with a fake `gh` on PATH that records its arguments. */
+function runKeepalive({ ghExit = 0 } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'keepalive-'));
+  const log = join(dir, 'gh.log');
+  writeFileSync(join(dir, 'gh'), `#!/bin/sh\necho "$@" >> "${log}"\necho "token seen: $GH_TOKEN" >&2\nexit ${ghExit}\n`, { mode: 0o755 });
   const { script } = keepaliveScript();
-  for (const [days, expected] of [[50, '2'], [10, '1']]) {
-    const repo = repoQuietFor(days);
-    const r = spawnSync('bash', ['-c', script], {
-      cwd: repo.work, encoding: 'utf8',
-      env: { ...process.env, GH_TOKEN: 'ghs_SECRET_token_abc123', GITHUB_REPOSITORY: 'owner/repo', GITHUB_REF_NAME: 'main', KEEPALIVE_REMOTE: join(repo.dir, 'remote.git') },
-    });
-    assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.equal(repo.count(), expected, `${days} days quiet`);
-    assert.ok(!(r.stdout + r.stderr).includes('ghs_SECRET_token_abc123'));
-  }
+  const r = spawnSync('bash', ['-c', script], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, GH_TOKEN: 'ghs_SECRET_token_abc123', GITHUB_REPOSITORY: 'owner/repo', GITHUB_WORKFLOW_REF: 'owner/repo/.github/workflows/ingest.yml@refs/heads/main' },
+  });
+  let calls = '';
+  try { calls = readFileSync(log, 'utf8'); } catch {}
+  return { ...r, calls };
+}
+
+test('keepalive re-enables this workflow through the GitHub API instead of committing', () => {
+  const r = runKeepalive();
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.equal(r.calls.trim(), 'api -X PUT repos/owner/repo/actions/workflows/ingest.yml/enable');
+  assert.ok(!(r.stdout + r.stderr).includes('ghs_SECRET_token_abc123'), 'the token is not printed');
+});
+
+test('a keepalive API failure is a visible warning, not a silent pass, and does not block ingest', () => {
+  const r = runKeepalive({ ghExit: 1 });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /::warning title=keepalive::/);
+  assert.ok(!(r.stdout + r.stderr).includes('ghs_SECRET_token_abc123'));
 });
