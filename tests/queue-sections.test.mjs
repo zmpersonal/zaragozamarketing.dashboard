@@ -80,3 +80,16 @@ test('/api/queue returns triage and its reasons for every open thread, spam incl
   assert.equal(byId['gmail:s'].triage, 'spam');
   assert.deepEqual(reasonCodes(byId['gmail:s']), ['gmail_spam']);
 });
+
+test('a section the API cut says so: "N of M" in the header and a visible note', () => {
+  const threads = [t('s1', 'spam'), t('s2', 'spam')];
+  for (const tier of ['customer', 'bulk', 'spam']) {
+    const section = { ...sectionThreads(threads.map((x) => ({ ...x, triage: tier }))).find((x) => x.tier === tier) };
+    const cut = renderSection(section, esc, { total: 380 });
+    assert.match(cut, /\(2 of 380\)/, tier);
+    assert.match(cut, /378 more not shown/, tier);
+    const whole = renderSection(section, esc, { total: 2 });
+    assert.match(whole, /\(2\)/);
+    assert.doesNotMatch(whole, /not shown/);
+  }
+});

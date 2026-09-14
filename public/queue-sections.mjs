@@ -34,6 +34,8 @@ const defaults = {
   color: () => 'var(--steam)',
   brandName: () => '',
   selected: null,
+  /** Tier total from /api/queue; when larger than the rows given, the section says it was cut. */
+  total: undefined,
 };
 
 /** A clickable queue row for needs-reply and bulk threads. */
@@ -75,7 +77,10 @@ function spamRow(t, esc, o) {
 export function renderSection(section, esc, opts = {}) {
   const o = { ...defaults, ...opts };
   const n = section.threads.length;
-  const title = `<h3 class="section-title section-${section.tier}">${esc(section.title)} (${n})</h3>`;
+  // The API limits each tier separately and reports the total; a cut list must say so.
+  const total = Number.isFinite(o.total) && o.total > n ? o.total : n;
+  const title = `<h3 class="section-title section-${section.tier}">${esc(section.title)} (${total > n ? `${n} of ${total}` : n})</h3>` +
+    (total > n ? `<p class="section-cut">${total - n} more not shown. Oldest first; clear some to see the rest.</p>` : '');
 
   if (section.tier === 'spam') {
     return (

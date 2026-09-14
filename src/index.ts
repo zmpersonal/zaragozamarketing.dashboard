@@ -131,33 +131,58 @@ async function board(env: Env) {
 }
 
 /**
- * The queue, in two groups:
+ * Rows returned per tier. Each tier is its own query with its own limit, so
+ * no tier can crowd another out: round 8 found real Needs-reply threads
+ * missing because one query served all three tiers and older spam used up a
+ * shared LIMIT. The response reports shown vs total per tier, so a cut list
+ * is visible instead of silent.
+ */
+export const QUEUE_LIMITS = { customer: 500, bulk: 200, spam: 200 };
+
+type Tier = keyof typeof QUEUE_LIMITS;
+/** Anything not bulk or spam is Needs reply, matching the UI: an unknown tier is never dropped. */
+const TIER_SQL: Record<Tier, string> = {
+  customer: "t.triage NOT IN ('bulk','spam')",
+  bulk: "t.triage = 'bulk'",
+  spam: "t.triage = 'spam'",
+};
+
+/**
+ * One tier of the queue, in two groups:
  *   1. waiting: longest-waiting first, from awaiting_since (the oldest
  *      unanswered inbound), never conversation_started_at.
  *   2. blocked: below every waiting thread, longest-blocked first, from
  *      blocked_since. Blocked is a different kind of waiting, not ageless.
  * Priority orders within each group.
  */
-async function queue(env: Env, user: User, mine: boolean) {
-  const sql = `
+async function queueTier(env: Env, user: User, mine: boolean, tier: Tier) {
+  const where = `t.status IN ('waiting','blocked') AND ${TIER_SQL[tier]}
+      ${mine ? 'AND (t.assignee = ?1 OR t.assignee IS NULL)' : ''}`;
+  const bind = (sql: string) => (mine ? env.DB.prepare(sql).bind(user.email) : env.DB.prepare(sql));
+  const rows = await bind(`
     SELECT t.id, t.brand_id, t.channel, t.subject, t.customer_name,
            t.customer_handle, t.preview, t.status, t.blocked_on, t.blocked_note,
            t.assignee, t.priority, t.conversation_started_at, t.last_inbound_at,
            t.awaiting_since, t.blocked_since, t.is_automated, t.triage, t.triage_signals
     FROM thread t
-    WHERE t.status IN ('waiting','blocked')
-      ${mine ? 'AND (t.assignee = ?1 OR t.assignee IS NULL)' : ''}
+    WHERE ${where}
     ORDER BY t.status = 'blocked',
              t.priority DESC,
              CASE WHEN t.status = 'blocked' THEN t.blocked_since ELSE t.awaiting_since END IS NULL,
              CASE WHEN t.status = 'blocked' THEN t.blocked_since ELSE t.awaiting_since END ASC,
              t.conversation_started_at ASC
-    LIMIT 200`;
-  const stmt = mine
-    ? env.DB.prepare(sql).bind(user.email)
-    : env.DB.prepare(sql);
-  const { results } = await stmt.all();
-  return results;
+    LIMIT ${QUEUE_LIMITS[tier]}`).all();
+  const count = await bind(`SELECT COUNT(*) AS n FROM thread t WHERE ${where}`).first<{ n: number }>();
+  return { threads: rows.results, shown: rows.results.length, total: count?.n ?? rows.results.length };
+}
+
+async function queue(env: Env, user: User, mine: boolean) {
+  const tiers = Object.keys(QUEUE_LIMITS) as Tier[];
+  const parts = await Promise.all(tiers.map((tier) => queueTier(env, user, mine, tier)));
+  return {
+    threads: parts.flatMap((p) => p.threads),
+    tiers: Object.fromEntries(tiers.map((tier, i) => [tier, { shown: parts[i].shown, total: parts[i].total }])),
+  };
 }
 
 async function todos(env: Env, user: User, mine: boolean) {
@@ -202,7 +227,7 @@ export default {
       return json({ user, board: await board(env), ingest_failures: await listFailures(env.DB) });
     }
     if (req.method === 'GET' && path === 'queue') {
-      return json({ threads: await queue(env, user, mine) });
+      return json(await queue(env, user, mine));
     }
     if (req.method === 'GET' && path === 'todos') {
       return json({ todos: await todos(env, user, mine) });
