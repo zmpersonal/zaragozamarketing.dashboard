@@ -19,6 +19,8 @@
   }
 
   * { box-sizing: border-box; }
+  /* The hidden attribute must win over any display rule (round 11: "Blocked on" showed for every status). */
+  [hidden] { display: none !important; }
 
   body {
     margin: 0;
@@ -113,6 +115,9 @@
   }
   .cell .oldest { font-size: 12px; color: var(--steam); margin-top: 4px; }
   .cell.quiet .count { color: #b4c1bd; font-weight: 400; }
+  .cell .oldest.warning { color: #6b4c12; }
+  .cell .oldest.error { color: var(--ember); font-weight: 500; }
+  .sub.error { color: var(--ember); }
 
   /* Heat bar: how long the oldest unanswered item has been sitting.
      Cold plunge blue when fresh, sauna ember when it has been too long. */
@@ -183,6 +188,20 @@
     background: var(--surface); border: 1px dashed var(--line);
     border-radius: var(--radius); padding: 34px; text-align: center; color: var(--steam);
   }
+  /* A stale or broken queue must never look like an empty one. */
+  .empty.warning { border: 1px solid var(--brass); color: #6b4c12; background: #fbf5e8; }
+  .empty.error { border: 1px solid var(--ember); color: var(--ember); background: #fbefe9; font-weight: 500; }
+  .banner { margin-bottom: 14px; }
+  .banner .empty { padding: 12px 16px; text-align: left; }
+
+  /* Last successful sync per source. */
+  #synced { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+  .sync { font-size: 12px; color: var(--steam); white-space: nowrap; }
+  .sync.warning { color: #6b4c12; background: #fbf5e8; border: 1px solid var(--brass); border-radius: 20px; padding: 1px 8px; }
+  .sync.error { color: #fff; background: var(--ember); border-radius: 20px; padding: 1px 8px; font-weight: 500; }
+
+  .section-cut { margin: 8px 0 0; font-size: 12.5px; color: var(--steam); }
+  .more { background: var(--surface); border: 1px solid var(--line); border-radius: 20px; padding: 2px 10px; font-size: 12.5px; margin-left: 6px; }
 
   /* ---------- right panel ---------- */
   .panel {
@@ -285,6 +304,8 @@
       <tbody id="matrix"></tbody>
     </table>
 
+    <div class="banner" id="banner"></div>
+
     <div class="filters" id="filters">
       <button data-f="all" aria-pressed="true">All open</button>
       <button data-f="unassigned" aria-pressed="false">Unassigned</button>
@@ -299,14 +320,15 @@
 </div>
 
 <script type="module">
-import { sectionThreads, renderSection, headerCounts, brandCell } from './queue-sections.mjs';
-import { esc, threadHeaderHtml, historyHtml, todoRowHtml, matrixCellHtml } from './render.mjs';
+import { SECTIONS, renderSection } from './queue-sections.mjs';
+import { esc, threadHeaderHtml, historyHtml, todoRowHtml, matrixCellHtml, matrixCellView, todoListStatusHtml } from './render.mjs';
+import { freshnessBadgeHtml, emptyQueueHtml } from './freshness.mjs';
+import { reloadLoadedPages } from './paging.mjs';
 
 // ---------------------------------------------------------------
-// Mock data. Delete MOCK and flip USE_API once D1 is seeded —
-// every fetch below already points at the real Worker routes.
+// Everything comes from the Worker's API. There is no mock data: a page that
+// can't reach the API says so, and never shows an empty queue instead.
 // ---------------------------------------------------------------
-const USE_API = false;
 
 const BRANDS = [
   { id: 'inhouse',     name: 'InHouse Wellness' },
@@ -314,103 +336,41 @@ const BRANDS = [
   { id: 'caliza',      name: 'Caliza Group' },
   { id: 'reachjulian', name: 'Reach Julian' },
 ];
+const TIERS = SECTIONS.map((s) => s.tier);
+const REFRESH_MS = 60_000;
 
-const h = (n) => Math.floor(Date.now() / 1000) - n * 3600;
-
-const MOCK = {
-  user: { email: 'agent@inhousewellness.com', role: 'agent' },
-  threads: [
-    { id: 'gmail:1', brand_id: 'inhouse', channel: 'email', subject: 'Sauna heater tripping the breaker',
-      customer_name: 'Dana Reyes', customer_handle: 'dana@…', status: 'waiting', assignee: null,
-      conversation_started_at: h(41), awaiting_since: h(41), preview: 'Third time this week. It runs about twenty minutes then cuts out.' },
-    { id: 'quo:1', brand_id: 'inhouse', channel: 'phone', subject: 'Missed call',
-      customer_name: 'Marcus Bell', customer_handle: '+1 512 555 0142', status: 'waiting', assignee: null,
-      conversation_started_at: h(29), awaiting_since: h(29), preview: 'Voicemail: asking about the chiller warranty.' },
-    { id: 'gmail:2', brand_id: 'caliza', channel: 'email', subject: 'Invoice 2214 — wrong PO number',
-      customer_name: 'Priya Raman', customer_handle: 'ap@…', status: 'blocked', blocked_on: 'owner',
-      blocked_note: 'Needs Julian to confirm the revised PO before we reissue.',
-      assignee: 'agent@inhousewellness.com', conversation_started_at: h(19), awaiting_since: null, blocked_since: h(17), preview: 'Our AP system rejected it.' },
-    { id: 'chat:1', brand_id: 'inhouse', channel: 'chat', subject: 'Plunge chiller sizing',
-      customer_name: 'Visitor', customer_handle: 'chat', status: 'waiting', assignee: null,
-      conversation_started_at: h(7), awaiting_since: h(7), is_automated: 1, preview: 'Bot answered sizing, then they asked about 220v wiring.' },
-    { id: 'gmail:3', brand_id: 'thi', channel: 'email', subject: 'Reschedule install — Thursday?',
-      customer_name: 'Ken Ito', customer_handle: 'ken@…', status: 'waiting',
-      assignee: 'agent@inhousewellness.com', conversation_started_at: h(5), awaiting_since: h(5), preview: 'Any chance we move to Thursday morning.' },
-    { id: 'gmail:4', brand_id: 'reachjulian', channel: 'email', subject: 'Podcast booking request',
-      customer_name: 'Sam Ortiz', customer_handle: 'sam@…', status: 'waiting', assignee: null,
-      conversation_started_at: h(2), awaiting_since: h(2), preview: 'Pitching a guest for the December run.' },
-    { id: 'quo:2', brand_id: 'caliza', channel: 'phone', subject: 'Text',
-      customer_name: 'Rosa Lim', customer_handle: '+1 737 555 0198', status: 'blocked', blocked_on: 'shipping',
-      blocked_note: 'Carrier claim filed, waiting on their inspection.',
-      assignee: null, conversation_started_at: h(63), awaiting_since: null, blocked_since: h(6 * 24), preview: 'Pallet arrived damaged, wants an ETA on replacement.' },
-    { id: 'gmail:5', brand_id: 'inhouse', channel: 'email', subject: 'PROMOTIONS + UPDATED INVENTORY 9-11-2026',
-      customer_name: 'Supplier Deals', customer_handle: 'deals@supplier.example', status: 'waiting', assignee: null,
-      conversation_started_at: h(30), awaiting_since: h(30), triage: 'bulk',
-      triage_signals: JSON.stringify([{ code: 'list_unsubscribe', why: 'has a List-Unsubscribe header' }, { code: 'gmail_promo', why: 'Gmail filed it under Promotions' }]),
-      preview: 'New arrivals and clearance pricing.' },
-    { id: 'gmail:6', brand_id: 'inhouse', channel: 'email', subject: 'Refund Request – Order #467740987 for the heater I returned last week',
-      customer_name: 'Accounts', customer_handle: 'admin@refund-desk.example', status: 'waiting', assignee: null,
-      conversation_started_at: h(20), awaiting_since: h(20), triage: 'spam',
-      triage_signals: JSON.stringify([{ code: 'gmail_spam', why: 'Gmail marked it as spam' }]),
-      preview: 'Please process my refund.' },
-    { id: 'gmail:7', brand_id: 'inhouse', channel: 'email', subject: 'Get 5★ Reviews from old Accounts — 100% Satisfaction Guaranteed',
-      customer_name: 'Steven', customer_handle: 'reviews4u@spam.example', status: 'waiting', assignee: null,
-      conversation_started_at: h(50), awaiting_since: h(50), triage: 'spam',
-      triage_signals: JSON.stringify([{ code: 'gmail_spam', why: 'Gmail marked it as spam' }]),
-      preview: '' },
-  ],
-  actions: {
-    'gmail:2': [
-      { actor: 'agent@inhousewellness.com', kind: 'note', created_at: h(6),
-        body: 'Flagged to Julian in Slack. He is out until Thursday.' },
-      { actor: 'agent@inhousewellness.com', kind: 'replied', created_at: h(17),
-        body: 'Told Priya we are correcting it and will reissue within two business days.' },
-    ],
-  },
-  todos: [
-    { id: 1, title: 'Call the sauna heater supplier about the breaker complaints',
-      brand_id: 'inhouse', due_at: h(-4), assignee: 'agent@inhousewellness.com' },
-    { id: 2, title: 'Chase carrier claim on the Caliza pallet',
-      brand_id: 'caliza', thread_id: 'quo:2', due_at: h(-30), assignee: null },
-    { id: 3, title: 'Write the 220v wiring FAQ so chat can answer it',
-      brand_id: 'inhouse', due_at: null, assignee: 'agent@inhousewellness.com' },
-  ],
+const emptyTier = () => ({ threads: [], total: 0, loaded: false });
+const state = {
+  view: 'board', brand: null, filter: 'all', selected: null, detail: null,
+  user: null, board: [], sources: [], failures: [], serverNow: null, serverNowAt: 0,
+  tiers: Object.fromEntries(TIERS.map((t) => [t, emptyTier()])), pageSize: 50,
+  todos: [], todosTotal: 0, todosLoaded: false, boardLoaded: false, error: null, loaded: false,
 };
 
-// ---------------------------------------------------------------
-const state = { view: 'board', brand: null, filter: 'all', selected: null, ...MOCK };
-
-const api = async (path, opts) => {
-  if (!USE_API) return null;
+async function api(path, opts = {}) {
   const res = await fetch('/api/' + path, {
     ...opts,
-    headers: { 'content-type': 'application/json', ...(opts?.headers ?? {}) },
+    headers: { 'content-type': 'application/json', ...(opts.headers ?? {}) },
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    let why = res.statusText;
+    try { why = (await res.json()).error ?? why; } catch { /* not JSON */ }
+    throw new Error(`${res.status} ${why}`);
+  }
   return res.json();
-};
+}
 
 const NOW = () => Math.floor(Date.now() / 1000);
+/** The server's clock, advanced locally since the last board fetch: freshness never trusts the laptop clock. */
+const serverNow = () => (state.serverNow ?? NOW()) + Math.floor((Date.now() - state.serverNowAt) / 1000);
 const ageHours = (t) => (NOW() - t) / 3600;
-
-// Every age on this page runs from awaiting_since (the oldest inbound we have
-// not answered), never conversation_started_at. null = not waiting on us.
-// TODO: still wall-clock hours; must become business minutes (CLAUDE.md invariant 5).
+// TODO: still wall-clock hours; must become business minutes (CLAUDE.md invariant 6).
 const waitHours = (t) => (t.awaiting_since == null ? null : ageHours(t.awaiting_since));
-
-// Blocked threads age from blocked_since: a different kind of waiting, not ageless.
 const isBlocked = (t) => t.status === 'blocked';
 const since = (t) => (isBlocked(t) ? t.blocked_since : t.awaiting_since);
 const ageText = (t) => isBlocked(t)
   ? 'blocked' + (t.blocked_since == null ? '' : ' ' + ageLabel(t.blocked_since))
   : (t.awaiting_since == null ? '—' : ageLabel(t.awaiting_since));
-
-// Same order as /api/queue: waiting group first, then blocked; oldest first in each.
-const queueOrder = (a, b) =>
-  (isBlocked(a) - isBlocked(b)) ||
-  ((since(a) ?? Infinity) === (since(b) ?? Infinity)
-    ? a.conversation_started_at - b.conversation_started_at
-    : (since(a) ?? Infinity) < (since(b) ?? Infinity) ? -1 : 1);
 
 function ageLabel(t) {
   const hrs = ageHours(t);
@@ -425,23 +385,59 @@ function heatColor(hrs) {
   if (hrs < 24) return 'var(--brass)';
   return 'var(--ember)';
 }
+const brandName = (id) => BRANDS.find((b) => b.id === id)?.name ?? '—';
 
-const openThreads = () => state.threads.filter((t) => t.status === 'waiting' || t.status === 'blocked');
+// --- loading ---------------------------------------------------------------------
 
-function visibleThreads() {
-  let rows = openThreads();
-  if (state.view === 'mine') rows = rows.filter((t) => t.assignee === state.user.email || !t.assignee);
-  if (state.brand) rows = rows.filter((t) => t.brand_id === state.brand);
-  if (state.filter === 'unassigned') rows = rows.filter((t) => !t.assignee);
-  if (state.filter === 'blocked') rows = rows.filter((t) => t.status === 'blocked');
-  if (state.filter === 'overdue') rows = rows.filter((t) => waitHours(t) > 24);
-  return rows.sort(queueOrder);
+const mineParam = () => (state.view === 'mine' ? '&mine=1' : '');
+
+async function loadBoard() {
+  const b = await api('board');
+  Object.assign(state, { user: b.user, board: b.board, failures: b.ingest_failures, sources: b.sources, serverNow: b.now, serverNowAt: Date.now(), boardLoaded: true });
+}
+async function loadTier(tier, offset = 0) {
+  const page = await api(`queue?tier=${tier}&offset=${offset}${mineParam()}`);
+  const t = state.tiers[tier];
+  t.threads = offset ? [...t.threads, ...page.threads] : page.threads;
+  t.total = page.total;
+  t.loaded = true;
+  state.pageSize = page.page_size ?? state.pageSize;
+}
+async function loadTodos(more = false) {
+  const page = await api('todos?offset=' + (more ? state.todos.length : 0));
+  state.todos = more ? [...state.todos, ...page.todos] : page.todos;
+  state.todosTotal = page.total;
+  state.todosLoaded = true;
+}
+/** Refresh a tier without collapsing pages the agent opened. */
+async function reloadTier(tier) {
+  const t = state.tiers[tier];
+  const r = await reloadLoadedPages(async (offset) => api(`queue?tier=${tier}&offset=${offset}${mineParam()}`), t.threads.length, state.pageSize);
+  Object.assign(t, { threads: r.threads, total: r.total, loaded: true });
+}
+async function loadDetail(id) {
+  state.detail = await api('threads/' + encodeURIComponent(id));
 }
 
-// ---------------------------------------------------------------
+/** Run loaders; any failure is shown as an error, never as an empty queue. */
+async function load(...loaders) {
+  try {
+    await Promise.all(loaders.map((f) => f()));
+    state.error = null;
+  } catch (err) {
+    state.error = err.message;
+  }
+  state.loaded = true;
+  render();
+}
+const loadQueue = () => Promise.all(TIERS.map((t) => loadTier(t)));
+const reloadQueue = () => Promise.all(TIERS.map((t) => reloadTier(t)));
+
+// --- rendering ---------------------------------------------------------------------
+
 function renderRail() {
   document.getElementById('whoami').textContent =
-    state.user.email.split('@')[0] + ' · ' + state.user.role;
+    state.user ? state.user.email.split('@')[0] + ' · ' + state.user.role : 'Not signed in';
 
   const nav = document.getElementById('brands');
   nav.innerHTML = '';
@@ -459,8 +455,6 @@ function renderRail() {
 function renderMatrix() {
   const body = document.getElementById('matrix');
   body.innerHTML = '';
-  const rows = openThreads();
-
   for (const brand of BRANDS) {
     const tr = document.createElement('tr');
     const th = document.createElement('th');
@@ -468,25 +462,18 @@ function renderMatrix() {
     tr.append(th);
 
     for (const channel of ['email', 'phone', 'chat']) {
-      // Needs-reply only: bulk and spam are counted in their own sections.
-      const { count, oldest } = brandCell(rows, brand.id, channel);
-      const cell = { length: count };
+      // /api/board counts Needs-reply threads only: bulk and spam have their own section totals.
+      const cell = state.board.find((r) => r.brand_id === brand.id && r.channel === channel);
+      const count = cell?.waiting ?? 0;
+      const oldest = cell?.oldest_at ?? null;
       const hrs = oldest ? ageHours(oldest) : 0;
-      // 48h fills the bar. Anything past that is already as loud as it gets.
-      const fill = Math.min(100, (hrs / 48) * 100);
-
+      const view = matrixCellView({ brand: brand.id, count, oldestLabel: oldest ? ageLabel(oldest) : null, channel, sources: state.sources, now: serverNow(), loaded: state.boardLoaded && !state.error });
       const td = document.createElement('td');
       const btn = document.createElement('button');
-      btn.className = 'cell' + (cell.length ? '' : ' quiet');
-      btn.innerHTML = matrixCellHtml({
-        count: cell.length || '—',
-        oldest: oldest ? 'oldest ' + ageLabel(oldest) : cell.length ? 'none awaiting us' : 'clear',
-        fill,
-        color: heatColor(hrs),
-      });
+      btn.className = 'cell' + (count ? '' : ' quiet');
+      btn.innerHTML = matrixCellHtml({ count: view.count, oldest: view.note, fill: Math.min(100, (hrs / 48) * 100), color: heatColor(hrs), tone: view.tone });
       btn.onclick = () => { state.brand = brand.id; state.filter = 'all'; render(); };
-      btn.setAttribute('aria-label',
-        cell.length + ' waiting on ' + channel + ' for ' + brand.name);
+      btn.setAttribute('aria-label', view.count + ' waiting on ' + channel + ' for ' + brand.name + ', ' + view.note);
       td.append(btn);
       tr.append(td);
     }
@@ -494,49 +481,72 @@ function renderMatrix() {
   }
 }
 
+const filtered = () => state.brand !== null || state.filter !== 'all';
+function visible(threads) {
+  let rows = threads;
+  if (state.brand) rows = rows.filter((t) => t.brand_id === state.brand);
+  if (state.filter === 'unassigned') rows = rows.filter((t) => !t.assignee);
+  if (state.filter === 'blocked') rows = rows.filter((t) => t.status === 'blocked');
+  if (state.filter === 'overdue') rows = rows.filter((t) => waitHours(t) > 24);
+  return rows;
+}
+
 function renderQueue() {
-  const rows = visibleThreads();
   const wrap = document.getElementById('queue');
-  wrap.innerHTML = '';
+  const customer = state.tiers.customer;
+  document.getElementById('title').textContent = state.view === 'mine' ? 'My queue' : 'Waiting on us';
+  const over = customer.threads.filter((t) => waitHours(t) > 24).length;
+  const overText = over ? `, ${over}${customer.threads.length < customer.total && over === customer.threads.length ? '+' : ''} past 24 hours` : '';
+  document.getElementById('subtitle').textContent = state.loaded && !state.error
+    ? `${customer.total} need a reply${state.view === 'mine' ? ' (yours and unassigned)' : ' across all brands'}${overText}`
+    : '';
+  document.getElementById('synced').innerHTML = freshnessBadgeHtml(state.sources, serverNow(), esc);
 
-  document.getElementById('title').textContent =
-    state.view === 'mine' ? 'My queue' : 'Waiting on us';
-  // Needs-reply only: bulk and spam have their own counts in their section headers.
-  const { open: total, over24h: over } = headerCounts(openThreads(), NOW());
-  document.getElementById('subtitle').textContent =
-    total + ' need a reply across all brands' + (over ? ', ' + over + ' past 24 hours' : '');
-  document.getElementById('synced').textContent = 'Synced just now';
+  const banner = document.getElementById('banner');
+  banner.innerHTML = state.error ? emptyQueueHtml({ sources: state.sources, now: serverNow(), apiError: state.error }, esc) : '';
 
-  if (!rows.length) {
-    wrap.innerHTML =
-      '<div class="empty">Nothing waiting here. Pick another brand or clear the filter.</div>';
+  if (!state.loaded) {
+    wrap.innerHTML = '<div class="empty">Loading…</div>';
+    return;
+  }
+  if (state.error && !customer.loaded) {
+    wrap.innerHTML = '';
     return;
   }
 
-  // Three sections, nothing hidden: needs reply, probably not customers, spam (always expanded).
-  wrap.innerHTML = sectionThreads(rows).map((section) => renderSection(section, esc, {
-    ageText,
-    color: (t) => heatColor(since(t) == null ? 0 : ageHours(since(t))),
-    brandName,
-    selected: state.selected,
-  })).join('');
+  // Three sections, nothing hidden; each tier paged separately with its own total.
+  const sections = SECTIONS.map((s) => ({
+    ...s,
+    threads: visible(state.tiers[s.tier].threads),
+    opts: {
+      ageText, brandName, selected: state.selected,
+      color: (t) => heatColor(since(t) == null ? 0 : ageHours(since(t))),
+      pageSize: state.pageSize,
+      // "N of M" and the next-page control only mean something without a client-side filter.
+      total: filtered() ? undefined : state.tiers[s.tier].total,
+      emptyHtml: s.tier === 'customer' && !filtered() ? emptyQueueHtml({ sources: state.sources, now: serverNow(), apiError: state.error }, esc) : null,
+    },
+  }));
+  wrap.innerHTML = sections.map((section) => renderSection(section, esc, section.opts)).join('');
 }
 
 function renderPanel() {
   const panel = document.getElementById('panel');
   panel.innerHTML = '';
-
-  const t = state.threads.find((x) => x.id === state.selected);
-  if (t) panel.append(threadDetail(t));
+  if (state.selected) panel.append(threadDetail());
   panel.append(todoList());
 }
 
-function threadDetail(t) {
+function threadDetail() {
+  const listed = TIERS.flatMap((t) => state.tiers[t].threads).find((x) => x.id === state.selected);
+  const t = state.detail?.thread?.id === state.selected ? state.detail.thread : listed;
+  const box = document.createElement('div');
+  if (!t) return box;
+
   const frag = document.createElement('div');
   frag.className = 'section';
   frag.innerHTML = threadHeaderHtml(t, { brandName });
 
-  // --- log an action -------------------------------------------
   const form = document.createElement('div');
   form.className = 'section';
   form.innerHTML =
@@ -566,14 +576,14 @@ function threadDetail(t) {
         '<option value="owner">Owner sign-off</option>' +
         '<option value="other">Something else</option>' +
       '</select></label>' +
-    '<button class="save" id="saveAction">Save action</button>';
+    '<button class="save" id="saveAction">Save action</button>' +
+    '<p class="sub" id="saveError" role="alert"></p>';
 
   const statusSel = form.querySelector('#status');
-  statusSel.onchange = () => {
-    form.querySelector('#blockwrap').hidden = statusSel.value !== 'blocked';
-  };
+  statusSel.onchange = () => { form.querySelector('#blockwrap').hidden = statusSel.value !== 'blocked'; };
 
-  form.querySelector('#saveAction').onclick = async () => {
+  const save = form.querySelector('#saveAction');
+  save.onclick = async () => {
     const payload = {
       thread_id: t.id,
       kind: form.querySelector('#kind').value,
@@ -581,25 +591,23 @@ function threadDetail(t) {
       status: statusSel.value,
       blocked_on: statusSel.value === 'blocked' ? form.querySelector('#blocked_on').value : null,
     };
-    if (USE_API) await api('actions', { method: 'POST', body: JSON.stringify(payload) });
-
-    (state.actions[t.id] ??= []).unshift({ ...payload, actor: state.user.email, created_at: NOW() });
-    Object.assign(t, {
-      status: payload.status,
-      blocked_on: payload.blocked_on,
-      awaiting_since: payload.status === 'closed' ? null : t.awaiting_since,
-      assignee: t.assignee ?? state.user.email,
-    });
-    if (payload.status !== 'waiting' && payload.status !== 'blocked') state.selected = null;
-    render();
+    save.disabled = true;
+    try {
+      await api('actions', { method: 'POST', body: JSON.stringify(payload) });
+    } catch (err) {
+      form.querySelector('#saveError').textContent = 'Not saved: ' + err.message;
+      save.disabled = false;
+      return;
+    }
+    // The server decides where the thread now stands; show that, not a guess.
+    await load(loadBoard, reloadQueue, () => loadDetail(t.id));
   };
 
   const history = document.createElement('div');
   history.className = 'section';
-  const log = state.actions[t.id] ?? [];
+  const log = state.detail?.thread?.id === t.id ? state.detail.actions : [];
   history.innerHTML = historyHtml(log, { ageLabel });
 
-  const box = document.createElement('div');
   box.append(frag, form, history);
   return box;
 }
@@ -607,17 +615,8 @@ function threadDetail(t) {
 function todoList() {
   const wrap = document.createElement('div');
   wrap.className = 'section';
-  const mine = state.view === 'mine'
-    ? state.todos.filter((td) => td.assignee === state.user.email || !td.assignee)
-    : state.todos;
-
   wrap.innerHTML = '<div class="label">To do</div>';
-
-  if (!mine.length) {
-    wrap.insertAdjacentHTML('beforeend', '<p class="sub">Nothing on the list. Add the next thing.</p>');
-  }
-
-  for (const td of mine) {
+  for (const td of state.todos) {
     const overdue = td.due_at && td.due_at < NOW();
     const row = document.createElement('div');
     row.className = 'todo' + (overdue ? ' overdue' : '');
@@ -626,12 +625,13 @@ function todoList() {
       dueText: td.due_at ? ' · due ' + (overdue ? ageLabel(td.due_at) + ' ago' : 'in ' + ageLabel(td.due_at)) : '',
     });
     row.querySelector('input').onchange = async () => {
-      if (USE_API) await api('todos/' + td.id + '/done', { method: 'POST' });
-      state.todos = state.todos.filter((x) => x.id !== td.id);
-      render();
+      await load(async () => { await api('todos/' + td.id + '/done', { method: 'POST' }); await loadTodos(); });
     };
     wrap.append(row);
   }
+  wrap.insertAdjacentHTML('beforeend', todoListStatusHtml({ loaded: state.todosLoaded, error: state.todosLoaded ? null : state.error, shown: state.todos.length, total: state.todosTotal }));
+  const moreTodos = wrap.querySelector('[data-more-todos]');
+  if (moreTodos) moreTodos.onclick = () => load(() => loadTodos(true));
 
   const add = document.createElement('div');
   add.className = 'add-todo';
@@ -640,21 +640,16 @@ function todoList() {
   const submit = async () => {
     const title = input.value.trim();
     if (!title) return;
-    const body = { title, brand_id: state.brand, assignee: state.user.email };
-    if (USE_API) await api('todos', { method: 'POST', body: JSON.stringify(body) });
-    state.todos.push({ id: Date.now(), ...body, due_at: null });
-    input.value = '';
-    render();
+    await load(async () => {
+      await api('todos', { method: 'POST', body: JSON.stringify({ title, brand_id: state.brand }) });
+      await loadTodos();
+    });
   };
   add.querySelector('button').onclick = submit;
   input.onkeydown = (e) => { if (e.key === 'Enter') submit(); };
   wrap.append(add);
-
   return wrap;
 }
-
-// ---------------------------------------------------------------
-const brandName = (id) => BRANDS.find((b) => b.id === id)?.name ?? '—';
 
 function render() {
   renderRail();
@@ -667,21 +662,31 @@ function render() {
     b.setAttribute('aria-pressed', String(b.dataset.f === state.filter));
 }
 
+// --- events ----------------------------------------------------------------------------
+
 const queueEl = document.getElementById('queue');
-const openThread = (e) => {
+queueEl.onclick = async (e) => {
+  const more = e.target.closest('[data-more-tier]');
+  if (more) {
+    const tier = more.dataset.moreTier;
+    more.disabled = true;
+    await load(() => loadTier(tier, state.tiers[tier].threads.length));
+    return;
+  }
   const el = e.target.closest('[data-thread]');
   if (!el) return;
   state.selected = el.dataset.thread;
+  state.detail = null;
   render();
+  await load(() => loadDetail(state.selected));
 };
-queueEl.onclick = openThread;
-queueEl.onkeydown = (e) => { if (e.key === 'Enter') openThread(e); };
+queueEl.onkeydown = (e) => { if (e.key === 'Enter') queueEl.onclick(e); };
 
-document.getElementById('views').onclick = (e) => {
+document.getElementById('views').onclick = async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   state.view = b.dataset.view;
-  render();
+  await load(loadQueue);
 };
 document.getElementById('filters').onclick = (e) => {
   const b = e.target.closest('button');
@@ -691,15 +696,11 @@ document.getElementById('filters').onclick = (e) => {
 };
 
 async function boot() {
-  if (USE_API) {
-    const [me, q, td] = await Promise.all([api('board'), api('queue'), api('todos')]);
-    state.user = me.user;
-    state.threads = q.threads;
-    state.todos = td.todos;
-    state.actions = {};
-    if (state.user.role === 'agent') state.view = 'mine';
-  }
-  render();
+  await load(loadBoard, loadTodos);
+  if (state.user?.role === 'agent') state.view = 'mine';
+  await load(loadQueue);
+  // Keep ages and sync freshness current; a stopped ingest shows up without a reload.
+  setInterval(() => load(loadBoard, reloadQueue, loadTodos), REFRESH_MS);
 }
 boot();
 </script>

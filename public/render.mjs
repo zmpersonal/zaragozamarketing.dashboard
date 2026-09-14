@@ -4,6 +4,8 @@
 // (tests/ui-escaping.test.mjs), which also checks index.html builds markup
 // from nothing but literals and these functions.
 
+import { sourceFreshness } from './freshness.mjs';
+
 const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ENTITIES[c]);
 
@@ -37,12 +39,38 @@ export function todoRowHtml(td, { brandName, dueText }) {
 }
 
 /** One brand × channel cell: Needs-reply count, oldest wait, heat bar. */
-export function matrixCellHtml({ count, oldest, fill, color }) {
+export function matrixCellHtml({ count, oldest, fill, color, tone = 'fresh' }) {
   const width = Math.max(0, Math.min(100, Number(fill) || 0));
   const heat = /^var\(--[a-z]+\)$/.test(color) ? color : 'var(--steam)';
   return (
     '<div class="count num">' + esc(count) + '</div>' +
-    '<div class="oldest">' + esc(oldest) + '</div>' +
+    '<div class="oldest ' + (['fresh', 'warning', 'error', 'none'].includes(tone) ? tone : 'none') + '">' + esc(oldest) + '</div>' +
     '<div class="heat"><span style="width:' + width + '%;background:' + heat + '"></span></div>'
   );
+}
+
+/**
+ * What one brand × channel cell says. "clear" is only said when the board
+ * loaded and every source for that channel synced recently; otherwise the cell
+ * says it can't vouch for the number (round 11: it used to say "clear" while
+ * the API was failing, the sync was 13 hours stale, or no source existed).
+ */
+export function matrixCellView({ brand, count, oldestLabel, channel, sources, now, loaded }) {
+  if (!loaded) return { count: '?', note: 'not loaded', tone: 'error' };
+  const mine = sources.filter((s) => s.channel === channel && s.brand_id === brand).map((s) => sourceFreshness(s, now));
+  if (!mine.length) return { count: count ? String(count) : '—', note: 'not connected', tone: 'none' };
+  const worst = mine.find((s) => s.state === 'error') ?? mine.find((s) => s.state === 'warning');
+  if (worst) {
+    const when = worst.age === null ? 'never synced' : `synced ${worst.text.split(' synced ')[1]}`;
+    return { count: count ? String(count) : '—', note: `not verified: ${when}`, tone: worst.state };
+  }
+  return { count: count ? String(count) : '—', note: count ? (oldestLabel ? `oldest ${oldestLabel}` : 'none awaiting us') : 'clear', tone: 'fresh' };
+}
+
+/** The line under the to-do list: an error, "nothing on the list", or "N of M" with a control for more. */
+export function todoListStatusHtml({ loaded, error, shown, total }) {
+  if (error || !loaded) return `<p class="sub error" role="alert">Could not load to-dos${error ? ` (${esc(error)})` : ''}. This is not an empty list.</p>`;
+  if (!total) return '<p class="sub">Nothing on the list. Add the next thing.</p>';
+  if (shown < total) return `<p class="sub">Showing ${shown} of ${total}. <button class="more" data-more-todos="1">Show more</button></p>`;
+  return '';
 }

@@ -231,17 +231,20 @@ async function queue(env: Env, user: User, mine: boolean) {
   };
 }
 
-async function todos(env: Env, user: User, mine: boolean) {
-  const sql = `
-    SELECT id, brand_id, thread_id, title, detail, assignee, due_at, created_at
-    FROM todo
-    WHERE done_at IS NULL
-      ${mine ? 'AND (assignee = ?1 OR assignee IS NULL)' : ''}
-    ORDER BY due_at IS NULL, due_at ASC, created_at ASC
-    LIMIT 100`;
-  const stmt = mine ? env.DB.prepare(sql).bind(user.email) : env.DB.prepare(sql);
-  const { results } = await stmt.all();
-  return results;
+/** Open to-dos are paged with a total, like the queue (round 11: a 101st to-do used to vanish). */
+export const TODO_PAGE = 100;
+
+async function todos(env: Env, user: User, mine: boolean, offset: number) {
+  const where = `done_at IS NULL ${mine ? 'AND (assignee = ?1 OR assignee IS NULL)' : ''}`;
+  const b = (sql: string) => (mine ? env.DB.prepare(sql).bind(user.email) : env.DB.prepare(sql));
+  const [rows, count] = await Promise.all([
+    b(`SELECT id, brand_id, thread_id, title, detail, assignee, due_at, created_at
+       FROM todo WHERE ${where}
+       ORDER BY due_at IS NULL, due_at ASC, created_at DESC, id DESC
+       LIMIT ${TODO_PAGE} OFFSET ${offset}`).all(),
+    b(`SELECT COUNT(*) AS n FROM todo WHERE ${where}`).first<{ n: number }>(),
+  ]);
+  return { todos: rows.results, total: count?.n ?? 0, offset, page_size: TODO_PAGE };
 }
 
 // ---------------------------------------------------------------
@@ -275,7 +278,9 @@ export default {
     // --- reads -------------------------------------------------
     if (req.method === 'GET' && path === 'board') {
       // ingest_failures: items ingest could not sync, including skipped ones, so a stuck record is visible.
-      return json({ user, board: await board(env), ingest_failures: await listFailures(env.DB) });
+      // sources + now: the UI shows each source's last successful sync against the server's clock.
+      const sources = (await env.DB.prepare('SELECT id, brand_id, provider, channel, address, last_synced_at FROM source ORDER BY channel, id').all()).results;
+      return json({ user, board: await board(env), ingest_failures: await listFailures(env.DB), sources, now: now() });
     }
     if (req.method === 'GET' && path === 'queue') {
       const tier = url.searchParams.get('tier');
@@ -291,7 +296,9 @@ export default {
       return json({ tier, offset, threads, shown: threads.length, total: totals[tier as Tier], page_size: QUEUE_PAGE });
     }
     if (req.method === 'GET' && path === 'todos') {
-      return json({ todos: await todos(env, user, mine) });
+      const offsetParam = url.searchParams.get('offset');
+      if (offsetParam !== null && !/^\d+$/.test(offsetParam)) return json({ error: 'offset must be a whole number' }, 400);
+      return json(await todos(env, user, mine, Number(offsetParam ?? 0)));
     }
     if (req.method === 'GET' && path.startsWith('threads/')) {
       let id: string;

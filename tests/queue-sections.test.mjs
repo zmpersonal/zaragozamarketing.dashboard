@@ -93,3 +93,19 @@ test('a section the API cut says so: "N of M" in the header and a visible note',
     assert.doesNotMatch(whole, /not shown/);
   }
 });
+
+test('a paged section offers the next page with a labelled control, never a hidden remainder', () => {
+  const section = sectionThreads([t('b1', 'bulk'), t('b2', 'bulk')]).find((x) => x.tier === 'bulk');
+  const html = renderSection(section, esc, { total: 120, pageSize: 50 });
+  assert.match(html, /Showing 2 of 120, oldest first/);
+  assert.match(html, /<button class="more" data-more-tier="bulk">Show 50 more<\/button>/);
+  const last = renderSection(section, esc, { total: 30, pageSize: 50 });
+  assert.match(last, /Show 28 more/);
+  assert.doesNotMatch(renderSection(section, esc, { total: 2 }), /data-more-tier/);
+});
+
+test('an empty section can show a caller-supplied message (the freshness-aware empty state)', () => {
+  const empty = sectionThreads([]).find((x) => x.tier === 'customer');
+  assert.match(renderSection(empty, esc, { emptyHtml: '<div class="empty warning">stale</div>' }), /class="empty warning"/);
+  assert.match(renderSection(empty, esc, {}), /Nothing here/);
+});

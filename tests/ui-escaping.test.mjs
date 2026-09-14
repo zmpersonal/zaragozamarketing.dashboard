@@ -72,12 +72,13 @@ test('index.html builds markup only from literals and the tested render function
   const script = html.slice(html.indexOf('<script type="module">'));
   const sinks = [...script.matchAll(/(?:\.innerHTML\s*=|insertAdjacentHTML\(\s*'[a-z]+'\s*,)\s*([\s\S]*?);\s*\n/g)];
   assert.ok(sinks.length >= 8, `found ${sinks.length} sinks`);
-  const ALLOWED = ['threadHeaderHtml', 'historyHtml', 'todoRowHtml', 'matrixCellHtml', 'renderSection', 'sectionThreads'];
+  const ALLOWED = ['threadHeaderHtml', 'historyHtml', 'todoRowHtml', 'matrixCellHtml', 'renderSection', 'sectionThreads', 'freshnessBadgeHtml', 'emptyQueueHtml', 'todoListStatusHtml'];
   for (const [statement, rhs] of sinks) {
     const noLiterals = rhs.replace(/'(?:[^'\\]|\\.)*'/g, 'LIT').replace(/`(?:[^`\\]|\\.)*`/g, 'LIT');
     const rest = stripAllowedCalls(noLiterals, ALLOWED)
-      .replace(/\.map\(\(\w+\)\s*=>\s*CALL\)/g, '')   // sectionThreads(...).map((s) => renderSection(...))
-      .replace(/\.join\(LIT\)/g, '');
+      .replace(/(?:\b[A-Za-z_$][\w$]*)?\.map\(\(\w+\)\s*=>\s*CALL\)/g, '')   // list.map((s) => renderSection(...))
+      .replace(/\.join\(LIT\)/g, '')
+      .replace(/^\s*[\w$.!]+\s*\?\s*(CALL|LIT)\s*:\s*(CALL|LIT)\s*$/, '$1');   // cond ? renderer(...) : '' (the condition never reaches the markup)
     assert.match(rest, /^(\s|LIT|CALL|\+|\(|\))*$/, `raw value in markup: ${statement.trim()}\n  -> ${rest}`);
   }
 });

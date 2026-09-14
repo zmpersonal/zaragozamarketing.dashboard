@@ -34,8 +34,11 @@ const defaults = {
   color: () => 'var(--steam)',
   brandName: () => '',
   selected: null,
-  /** Tier total from /api/queue; when larger than the rows given, the section says it was cut. */
+  /** Tier total from /api/queue; when larger than the rows given, the section says so and offers the next page. */
   total: undefined,
+  pageSize: 50,
+  /** Trusted HTML for an empty section (e.g. freshness.emptyQueueHtml), instead of the default line. */
+  emptyHtml: null,
 };
 
 /** A clickable queue row for needs-reply and bulk threads. */
@@ -79,14 +82,18 @@ export function renderSection(section, esc, opts = {}) {
   const n = section.threads.length;
   // The API limits each tier separately and reports the total; a cut list must say so.
   const total = Number.isFinite(o.total) && o.total > n ? o.total : n;
-  const title = `<h3 class="section-title section-${section.tier}">${esc(section.title)} (${total > n ? `${n} of ${total}` : n})</h3>` +
-    (total > n ? `<p class="section-cut">${total - n} more not shown. Oldest first; clear some to see the rest.</p>` : '');
+  const title = `<h3 class="section-title section-${section.tier}">${esc(section.title)} (${total > n ? `${n} of ${total}` : n})</h3>`;
+  // Paged, visibly: how many are not shown yet, and a control to fetch the next page (round 11).
+  const more = total > n
+    ? `<p class="section-cut">Showing ${n} of ${total}, oldest first. ${total - n} more not shown. ` +
+      `<button class="more" data-more-tier="${esc(section.tier)}">Show ${Math.min(o.pageSize, total - n)} more</button></p>`
+    : '';
 
   if (section.tier === 'spam') {
     return (
       `<section class="queue-section spam-section">${title}` +
         (n ? `<ul class="spam-list">${section.threads.map((t) => spamRow(t, esc, o)).join('')}</ul>`
-           : '<p class="section-empty">Nothing Gmail marked as spam.</p>') +
+           : o.emptyHtml ?? '<p class="section-empty">Nothing Gmail marked as spam.</p>') + more +
       '</section>'
     );
   }
@@ -94,7 +101,7 @@ export function renderSection(section, esc, opts = {}) {
   return (
     `<section class="queue-section">${title}` +
       (n ? `<div class="queue">${section.threads.map((t) => row(t, esc, o, reasons(t))).join('')}</div>`
-         : '<p class="section-empty">Nothing here.</p>') +
+         : o.emptyHtml ?? '<p class="section-empty">Nothing here.</p>') + more +
     '</section>'
   );
 }
