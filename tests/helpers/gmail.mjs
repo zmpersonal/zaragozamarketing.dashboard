@@ -55,10 +55,19 @@ const ledgerOf = (threads) => {
 function scanLedger(threads) {
   const L = ledgerOf(threads);
   for (const [threadId, msgs] of Object.entries(threads)) {
-    const list = msgs.raw ? [{ key: `${threadId}-raw`, labelIds: ['INBOX'] }] : msgs.map((m, i) => ({ key: `${threadId}-${i}`, labelIds: m.labelIds }));
-    for (const { key, labelIds } of list) {
-      const now = JSON.stringify([...labelIds].sort());
+    const list = msgs.raw ? [{ key: `${threadId}-raw`, labelIds: ['INBOX'] }] : msgs.map((m, i) => ({ key: `${threadId}-${i}`, labelIds: m.labelIds, deleted: m.deleted }));
+    for (const { key, labelIds, deleted } of list) {
       const before = L.seen.get(key);
+      if (deleted) {
+        // Permanently deleted: one messagesDeleted record, if Gmail had ever seen the message.
+        if (before !== undefined && before !== 'deleted') {
+          L.historyId += 1;
+          L.records.push({ id: String(L.historyId), messages: [{ id: key, threadId }], messagesDeleted: [{ message: { id: key, threadId } }] });
+        }
+        L.seen.set(key, 'deleted');
+        continue;
+      }
+      const now = JSON.stringify([...labelIds].sort());
       if (before === now) continue;
       L.historyId += 1;
       const ref = { id: key, threadId };
@@ -80,6 +89,16 @@ function scanLedger(threads) {
   return L;
 }
 
+/**
+ * Permanently delete messages (all of the thread's when `indexes` is omitted),
+ * as "Delete forever", emptying Trash, or Gmail's 30-day spam purge do. The
+ * messages vanish from search and threads.get; a thread with none left is 404.
+ */
+export function deleteMessages(threads, threadId, indexes) {
+  scanLedger(threads); // Gmail has seen them before they go
+  threads[threadId].forEach((m, i) => { if (!indexes || indexes.includes(i)) m.deleted = true; });
+}
+
 /** Make every history id so far unavailable, like Gmail after its retention window. */
 export function expireHistory(threads) {
   const L = scanLedger(threads);
@@ -92,7 +111,7 @@ function search(threads, q, includeSpamTrash) {
   let pool = [];
   for (const [threadId, msgs] of Object.entries(threads)) {
     if (msgs.raw) { pool.push({ id: `${threadId}-raw`, threadId, labelIds: ['INBOX'], at: Infinity, raw: true }); continue; }
-    msgs.forEach((m, i) => pool.push({ id: `${threadId}-${i}`, threadId, labelIds: m.labelIds, at: Date.parse(m.iso) }));
+    msgs.forEach((m, i) => { if (!m.deleted) pool.push({ id: `${threadId}-${i}`, threadId, labelIds: m.labelIds, at: Date.parse(m.iso) }); });
   }
   let anywhere = false;
   for (const token of q.trim().split(/\s+/)) {
@@ -179,13 +198,17 @@ export async function withGmail(threads, fn, { onToken, onGmail, requests, pageS
     }
     if (path.startsWith('threads/')) {
       const id = path.slice('threads/'.length);
-      const msgs = threads[id];
-      if (!msgs) return new Response('not found', { status: 404 });
-      if (msgs.raw) return ok({ id, ...msgs.raw }); // a thread served exactly as given, e.g. malformed
+      const all = threads[id];
+      const notFound = () => new Response(JSON.stringify({ error: { code: 404, status: 'NOT_FOUND', message: 'Requested entity was not found.' } }), { status: 404 });
+      if (!all) return notFound();
+      if (all.raw) return ok({ id, ...all.raw }); // a thread served exactly as given, e.g. malformed
+      // Real Gmail (verified on support@, round 8): a thread whose messages were all deleted is 404.
+      const msgs = all.map((m, i) => ({ m, i })).filter(({ m }) => !m.deleted);
+      if (!msgs.length) return notFound();
       return ok({
         id,
-        snippet: msgs.at(-1).subject,
-        messages: msgs.map((m, i) => ({
+        snippet: msgs.at(-1).m.subject,
+        messages: msgs.map(({ m, i }) => ({
           id: `${id}-${i}`,
           threadId: id,
           internalDate: String(Date.parse(m.iso)),
