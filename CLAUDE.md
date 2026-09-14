@@ -27,13 +27,26 @@ longer required.** The trade, recorded so nobody discovers it later:
   about an hour before it appears in the queue.
 - **GitHub can delay scheduled runs by 15–60 minutes under load**, so "hourly" can stretch to
   nearly two hours now and then.
-- **Phone:** the Quo webhook stays on the Worker so phone *can* be real-time, but **the webhook
-  only verifies and logs today; it does not write threads.** Until webhook ingest is built,
-  phone is hourly too, via the same Actions run.
+- **Phone is real-time (round 10).** A verified Quo webhook writes the thread as it arrives,
+  through the same code path as polling. The hourly Actions poll is the backstop.
 - **Limits that now bind:** Cloudflare's API allows 1,200 requests per 5 minutes per token (every
   call blocked for 5 minutes past that); each run stays under 1,000 D1 statements. GitHub Free
   allows 2,000 Actions minutes a month for a private repo; the 2-minute job timeout caps the
   worst case at 1,460. D1 Free allows 5 million rows read and 100,000 written a day.
+- **The Worker's own CPU on Workers Free is over the 10 ms limit on the busiest routes
+  (round 10, measured locally).** Measured in workerd (`wrangler dev`) against a local D1 holding
+  about a year of fabricated volume (4,365 threads), with V8's sampling profiler, 150 requests per
+  route. Trimmed mean CPU per request:
+  - `GET /api/queue` ~29–30 ms
+  - `POST /api/actions` ~17 ms
+  - `POST /hooks/quo` ~11 ms
+  - `GET /api/board`, `GET /api/todos`, `GET /api/threads/:id` ~5–6 ms
+  - small writes ~3 ms
+  Most of the queue's cost is the D1 binding decoding result rows inside the isolate, which
+  counts as CPU on Cloudflare too. Cutting bulk and spam to 50 rows only brought it to ~23 ms.
+  Cloudflare tolerates infrequent overruns but terminates a Worker that hits the limit
+  consistently (error 1102). **Owner decision pending:** Workers Paid for the Worker, or a
+  cheaper queue design, measured on Cloudflare before go-live. See HANDOFF, "Worker CPU".
 
 ## Commands
 
@@ -91,7 +104,9 @@ The response clock does **not** run from it (see invariant 4).
   it either. Tests: `tests/awaiting-since.test.mjs`, `tests/rescue.test.mjs`.
 - What "began" means per source:
   - **Gmail:** the thread's first message, which can be ours.
-  - **Quo:** the conversation's `createdAt`.
+  - **Quo:** the conversation's `createdAt` when polling saw it first. A thread first seen through
+    the webhook starts at its first event, since webhook events don't carry the conversation's
+    own `createdAt`.
   - **Chat:** the provider's `startedAt`.
 
 ### 4. The response clock runs from `awaiting_since`
@@ -125,6 +140,16 @@ never from `conversation_started_at`. The rules live once, in `src/lib/thread-st
   - **The actions route** records a wait when the agent stops the clock. `via` is `replied` or
     `called`, or `closed` for a close without contact (not a reply).
   - Tests: `tests/response.test.mjs`.
+  - **A killed sync can't lose a measurement** (round 10). An existing thread writes its response
+    rows before the thread UPDATE. A new thread is inserted with `waits_pending = 1`, which is
+    cleared after its rows are written; a later sync that finds the flag records them again. A REST
+    batch isn't documented as atomic, and this order doesn't rely on it.
+    `tests/partial-writes.test.mjs` kills the sync before every write, including inside a batch.
+- **Deleted mail** (round 10): a Gmail thread that is 404, or has nothing inbound left, becomes
+  `status = 'deleted'` with `deleted_at`, its clock stopped. No response row is written, so the
+  report never counts it as a reply. A closed thread stays closed and is only stamped. It reopens
+  like a closed thread on a new inbound. A malformed Gmail response is a failure, never a
+  deletion. Tests: `tests/gmail-deleted.test.mjs`.
 - **Held until we reply:** once set, `awaiting_since` holds until an outbound is seen after it,
   including a logged contact. A reopened thread can't slide back to a pre-close message on the
   next sync.
@@ -275,8 +300,20 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
     statements per run; the run's deadline is what usually binds.
   - Tests: `tests/quo-budget.test.mjs`, `tests/quo-ingest.test.mjs`.
   - The cursor advances unless a conversation failed and is still being retried.
-  - The webhook is meant to be the fast path, with polling as the backstop. **It does not write
-    threads yet**, so today polling (hourly, on Actions) is the only path.
+- **The Quo webhook writes phone activity as it happens** (round 10).
+  - A verified `message.received`, `message.delivered`, `message.undelivered`, `message.failed`,
+    `call.completed` or `call.missed` event becomes the same message or call shape polling reads.
+    It goes through `syncQuoActivity()` → `toTimeline()` → `syncThread()`, the one write path
+    polling uses too, so the two can't drift.
+  - Deduplicated by the `webhook-id` header (`webhook_delivery`, pruned after 7 days; Quo retries
+    for about 27.5 hours). The id is recorded only after processing succeeds, so a delivery that
+    failed with a 500 is processed when Quo retries it.
+  - Events we can't place (an unknown phone number, a null `conversationId`, other event types)
+    are acknowledged with 200 and ignored. A malformed event of an ingested type is a 400.
+  - Polling afterwards changes nothing. Two layers each prevent double counting: inbound
+    messages already seen don't start a wait, and `UNIQUE(thread_id, awaiting_since)`.
+  - A failed or undelivered text is not contact. A call doesn't blank a text preview.
+  - Tests: `tests/quo-webhook-ingest.test.mjs`.
   - `prove/quo.mjs` uses the same exported helpers.
 
 ### 8. Agents are identified individually
@@ -293,7 +330,18 @@ Never by a shared or rotating login.
 - **Accepted gap:** there is no per-thread authorization. Any signed-in agent can act on any
   thread or to-do. See HANDOFF.
 
-### 9. Public endpoints trust nothing unsigned
+### 9. Nothing a user types reaches the DOM unescaped; writes are same-origin JSON (round 10)
+- `public/render.mjs` builds the thread header, history, to-do rows and matrix cells. `esc()`
+  escapes `& < > " '`, and `public/queue-sections.mjs` builds the queue rows with it.
+  `tests/ui-escaping.test.mjs` feeds hostile text into every field. It also fails if
+  `index.html` builds markup from anything but literals and those functions.
+- `POST /api/*` requires `Content-Type: application/json` (415), an `Origin` equal to the Worker's
+  own (403), and `Sec-Fetch-Site: same-origin` when that header is present (403). These are
+  checked before any body is read.
+- An action's `kind`, `status` and `blocked_on` must be known values (400). An unknown thread or
+  to-do is a 404, never a 500. Tests: `tests/api-hardening.test.mjs`.
+
+### 10. Public endpoints trust nothing unsigned
 `/hooks/quo` verifies a Standard Webhooks signature, per Quo's versioned docs for API 2026-03-30,
 over the raw body before trusting it (`src/lib/quo-signature.ts`).
 - **Headers:** `webhook-id`, `webhook-timestamp` (seconds), and `webhook-signature` (`v1,<b64>`

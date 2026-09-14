@@ -223,22 +223,14 @@ Unverified against the real API:
   `arno.reply.smith@`) now match `NOREPLY`. None appeared in the real stream.
 
 ### Trash on real mail (round 8): not verified
-- The owner reported moving a junk message to Trash on support@. On re-running
-  `prove/ingest-live.mjs` against the saved state, support@'s Trash was **empty**: `in:trash`,
-  `labelIds=TRASH` and the TRASH label's own counts were all 0.
-- `history.list` since the round-7 baseline showed 6 messages added, 1 label added (a user
-  label, not TRASH) and **5 messages permanently deleted**. Four of those were threads ingested
-  in round 7, all `spam` from 14–15 August, which is Gmail's automatic 30-day spam purge. The
-  fifth was never ingested.
-- So either the message was moved in another mailbox, or it was deleted forever or Trash was
-  emptied before the re-run. Needs the owner to check, then re-run.
+- The owner reported moving a junk message to Trash on support@; support@'s Trash was empty on the
+  re-run, and history showed 5 permanent deletions (4 were Gmail's 30-day spam purge). Still needs
+  the owner to check and re-run.
 
-### Deleted mail is never noticed by ingest (round 8 finding)
-Gmail ingest asks `history.list` for message-added and label changes only, not
-`messageDeleted`. A permanently deleted message (including Gmail's own 30-day spam purge) leaves
-its thread row exactly as it was: the 4 purged spam threads above are still `spam` / `waiting`
-in the local database. For spam that's harmless. A real customer thread deleted in Gmail would
-stay in Needs reply forever. Not changed; owner decision on what a deleted thread should do.
+### Deleted mail (round 8 finding, handled round 10)
+Round 10: incremental sync asks for `messageDeleted`, and a deleted thread becomes `deleted` (see
+CLAUDE.md invariant 4). **Not covered:** a deletion that happens while Gmail no longer has the
+history (the expired-`historyId` fallback lists the window, which can't show what's gone).
 
 ### No agent table exists (round 8)
 There is no `agent` table. Anyone the Cloudflare Access policy lets in is an agent, and
@@ -278,14 +270,16 @@ the UI, and no sender-rule writes. Quo and chat threads are always `customer`.
 ### 4. The Shopify relay hides the customer
 `mailer@shopify.com` would be stored as the customer handle (see real-data findings).
 
-### 5. `POST /api/actions` doesn't validate `status` or `kind`
-An unknown `thread_id` returns 500.
+### 5. FIXED round 10: `POST /api/actions` didn't validate `status` or `kind`
+An unknown `thread_id` returned 500. Now 400 for unknown values and 404 for unknown threads.
 
-### 6. The UI renders `action.kind` unescaped
+### 6. FIXED round 10: the UI rendered `action.kind` unescaped
 
-### 7. Two non-atomic write pairs
-The reopen/unblock action log is written separately from the state change, and the response
-insert from the thread update in ingest.
+### 7. Non-atomic writes (round 10: measurements made safe)
+The response insert and the thread update are separate writes; round 10 orders them so a kill
+at any point is recovered on the next sync (CLAUDE.md invariant 4). **Still possible:** the
+reopened / unblocked / deleted action log row is written after the state change, so a kill in
+between loses that log line (not a measurement).
 
 ### 8. The history purge covers only `claude/inh-round-7`
 Round 7 rewrote this branch's history to remove a customer address and customer usernames.
@@ -320,9 +314,8 @@ the free tier.
 **The trade, recorded:**
 - Email reaches the queue roughly hourly instead of within five minutes.
 - GitHub can delay scheduled runs 15–60 minutes under load.
-- **Phone is not real-time yet.** The Quo webhook stays on the Worker for that purpose, but it
-  only verifies and logs; it doesn't write threads. Until webhook ingest is built (not in scope
-  for round 9 or 10 so far), phone is hourly.
+- **Phone is real-time since round 10**: the Quo webhook on the Worker writes threads. Polling
+  is the backstop.
 
 **Caps and why (round 9):**
 - Gmail: 150 threads, 500-message backfill pages, 5 history pages, 600 D1 statements per run.
@@ -373,16 +366,73 @@ repository inactivity, silently. GitHub documents this for public repos and does
   coerced numbers or null to text, conditional writes (`status = ?11`, `awaiting_since IS ?12`)
   would stop matching. `D1HttpClient.selfCheck()` runs first on every run and fails it red if
   types don't round-trip.
-- **Whether a REST `batch` is one transaction,** as the binding's is. The client sends a batch as
-  one request; the docs say it "will be executed as a batch".
+- **Whether a REST `batch` is one transaction (round 10: unsettled, but no longer load-bearing).**
+  - **Docs:** Cloudflare documents the Worker binding's `batch()` as a transaction ("it aborts or
+    rolls back the entire sequence"). The REST `/query` reference only says multiple statements
+    "will be executed as a batch", and says nothing about transactions, atomicity or rollback.
+  - **Not proven against the real database.** The D1 token is only in GitHub Actions secrets, and
+    `wrangler d1 … --remote` is a human step (CLAUDE.md invariant 1).
+  - **To settle it:** run `prove/d1-batch-atomicity.mjs` with `CLOUDFLARE_API_TOKEN`,
+    `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_D1_DATABASE_ID`. It creates a scratch table, sends a
+    batch whose second insert violates NOT NULL, prints ATOMIC or NOT ATOMIC, and drops the table.
+  - **Either answer is safe:** thread writes are ordered so that a partial batch, or a kill between
+    any two writes, is recovered on the next sync (CLAUDE.md invariant 4).
 - **Writes are not retried on 5xx or network errors**, since they may have been applied. The run
   fails that source and the next run re-syncs from the unchanged cursor. A write that did apply
   can leave one duplicate `action` log row (reopened / unblocked); thread and response writes are
   conditional or idempotent.
-- **Workers Free CPU (10 ms) for API requests.** Each `/api` request verifies the Access JWT
-  (WebCrypto) and runs D1 queries; `/api/queue` runs 6. Not measured.
+- **Workers Free CPU (10 ms): measured locally in round 10, over the limit.** See "Worker CPU".
 - **Scheduled workflows run only from the default branch.** `main` has no commits yet, so nothing
   runs on a schedule until this branch is merged.
+
+## Worker CPU (round 10): the busiest routes exceed Workers Free's 10 ms
+
+**Plainly: at realistic volume, `GET /api/queue` uses about three times Workers Free's CPU limit
+on every request. `POST /api/actions` and the Quo webhook are also over. This bears on the
+hosting decision.**
+
+**How it was measured:**
+- **Runtime:** the real Worker in workerd (`wrangler dev`, local). Access was answered by a test
+  key, so JWT verification ran for real.
+- **Data:** a local D1 with about a year of fabricated volume at support@'s observed rates, plus
+  phone: 4,365 threads (2,201 spam and 499 bulk waiting, 32 Needs reply), 2,735 actions, 1,633
+  responses, 300 to-dos.
+- **Method:** V8's sampling profiler over the inspector, 1 ms sampling, local tracing off, 150
+  requests per route. CPU is every non-idle sample; waiting on D1 is idle, as on Cloudflare.
+  Figures are the mean per request with the top 10% dropped:
+
+| Route | CPU per request | Response |
+|---|---|---|
+| baseline: 401, no work | 0.2 ms | |
+| baseline: JWT verification only | 1.8 ms | |
+| `GET /api/queue` (owner or agent) | **29–30 ms** | 296 kB, ~900 rows |
+| `POST /api/actions` (reply, answered) | **17 ms** | |
+| `POST /hooks/quo` (new conversation) | **11 ms** | |
+| `GET /api/todos` | 6 ms | 18 kB |
+| `GET /api/board` | 5 ms | |
+| `GET /api/threads/:id` (40 actions) | 5 ms | 6 kB |
+| `POST /api/todos`, `POST /api/todos/:id/done` | 3 ms | |
+
+**Where the queue's time goes:** the profile puts it in the D1 binding decoding results inside the
+isolate (`cloudflare-internal:d1-api`), reading response bodies, and converting results. That
+code runs in the Worker's isolate on Cloudflare too, so it counts. Cutting bulk and spam to 50
+rows each (116 kB) only brought it to ~23 ms, so trimming rows alone won't reach 10 ms.
+
+**Caveats:**
+- This is a local machine, not Cloudflare's edge, and the local D1 path isn't guaranteed to be
+  identical to production's.
+- Sampling at 1 ms is coarse per request, which is why means over 150 requests are used.
+- The true production figure needs a deploy: Workers Observability reports CPU time per invocation.
+
+**What Cloudflare does:** 10 ms per request on Free; waiting on D1 doesn't count. "Some built-in
+flexibility" for infrequent overruns, but a Worker hitting the limit consistently gets error 1102.
+
+**Owner decision:**
+1. Workers Paid for the Worker ($5/month; 30 s default CPU), keeping ingest on Actions, or
+2. Redesign the queue for fewer, cheaper D1 calls, e.g. counts first, and bulk/spam rows loaded
+   only when opened. Not done.
+
+Either way, measure on Cloudflare before go-live.
 
 ## Scale and cost — verify before go-live
 

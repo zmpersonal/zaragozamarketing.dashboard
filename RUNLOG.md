@@ -5,6 +5,65 @@ still unproven.
 
 ---
 
+## Round 10 — webhook ingest, and the remaining deploy blockers (2026-09-14, branch `claude/inh-round-10`, cut from `claude/inh-round-9`)
+
+Nothing was deployed, merged, pushed, or PR'd. No history was rewritten.
+
+### What changed
+1. **Keepalive without commits** (`ee4d5f8`). Round 9's keepalive pushed an empty commit to the
+   default branch, breaking the never-push-to-main rule through our own machinery.
+   - Every scheduled run now re-enables the workflow through
+     `PUT /repos/{repo}/actions/workflows/ingest.yml/enable`, the approach of
+     liskin/gh-workflow-keepalive and keepalive-workflow v2.
+   - Permissions are `contents: read` and `actions: write`, and a test fails if the workflow
+     commits or pushes.
+   - Unproven that it resets GitHub's 60-day clock; see HANDOFF.
+2. **Deleted-mail tests out of the stash** (`a13481b`), committed skipped with a round-10 note.
+   The stash was dropped only after the commit.
+3. **Quo webhook ingest** (`3b15a68`): phone is real-time.
+   - Events become the polling shapes and go through `syncQuoActivity` → `syncThread`.
+   - Deduplicated by `webhook-id`, recorded only after processing succeeds.
+   - Unknown numbers and conversations are acknowledged and ignored. Polling afterwards changes
+     nothing.
+   - A failed text is no longer contact, and a call no longer blanks the preview.
+4. **Partial writes** (`2b475da`).
+   - Response rows are written before the thread update; new threads carry `waits_pending` until
+     their rows exist.
+   - `prove/d1-batch-atomicity.mjs` settles REST batch atomicity when a human runs it.
+5. **Deleted mail** (`247fb87`): `deleted` status, no response row. The skipped tests were
+   un-skipped.
+6. **Security** (`cb5b8e0`).
+   - `public/render.mjs`: every DOM sink is escaped, including the action kind, which was raw.
+   - Same-origin JSON only on POST; 404s for unknown threads and to-dos; action value validation.
+7. **Worker CPU measured locally:** the queue ~30 ms, actions ~17 ms, webhook ~11 ms, all over
+   Free's 10 ms (HANDOFF, "Worker CPU").
+
+### Failing first, then passing
+- **Keepalive:** 4 of 8 workflow tests failed on the commit-based step; 8/8 after. 6/6 breaks
+  caught.
+- **Webhook ingest:** 10/10 failed on the verify-and-log handler; 12/12 after, including added
+  preview and failed-text tests.
+  - 14 breaks, 13 caught. The miss (`INSERT OR REPLACE`) is equivalent.
+  - Removing either anti-double-count layer alone is not caught, because the other still holds.
+    Removing both, applied by hand, is caught.
+- **Partial writes:** 4/4 failed (the thread moved on, the response row was lost); 4/4 after.
+  - 7/7 breaks caught.
+  - The prove script: 3 tests against atomic and non-atomic stubs.
+- **Deleted mail:** 5 of 6 failed first (round 9); 7/7 after, with a malformed-response test
+  added when a break was missed. 12/12 breaks caught.
+- **Security:**
+  - Escaping: the render module was missing, and the sink guard catches the round-9 raw `a.kind`.
+    6/6 after.
+  - API hardening: 7 of 9 failed first; 9/9 after.
+  - 20 breaks; the one miss was a test gap (the channel branch never rendered) and is now caught.
+- **Totals:** 283 tests, 283 pass, 0 fail, 0 skipped. Check and build are clean, verified after staging.
+
+### Real-system checks not possible this round
+- The REST batch atomicity proof and the Worker CPU on Cloudflare both need production
+  credentials or a deploy, which are human steps.
+
+---
+
 ## Round 9 — the queue bug, and ingest moves to GitHub Actions (2026-09-14, branch `claude/inh-round-9`, cut from `claude/inh-round-8`)
 
 Nothing was deployed, merged, pushed, or PR'd. Mid-round the owner changed the round: the

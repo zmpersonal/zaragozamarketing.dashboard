@@ -21,8 +21,10 @@ The stack was chosen to be cheap, secure, and still standing if every subscripti
   on Actions it isn't. The trade:
   - Email is checked roughly hourly, not every five minutes.
   - GitHub can delay scheduled runs by 15–60 minutes when it's busy.
-  - Phone is meant to stay real-time through the Quo webhook, but the webhook doesn't write
-    threads yet, so for now phone is hourly too.
+  - Phone is real-time: the Quo webhook on the Worker writes calls and texts as they happen.
+  - **Worker CPU:** measured locally, the busiest API routes use more than Workers Free's 10 ms
+    per request (the queue ~30 ms). Whether to pay for Workers ($5/month) or redesign the queue is
+    an open decision; see HANDOFF, "Worker CPU".
   - Free-tier ceilings: 2,000 Actions minutes a month (private repo; the workflow is capped at
     1,460 even in the worst case), 1,200 Cloudflare API requests per 5 minutes, and D1's
     5 million rows read and 100,000 written per day.
@@ -114,8 +116,15 @@ produces a second measurement.
     `webhook-timestamp` and `webhook-signature`, keyed by a `whsec_…` secret. The replay window
     is 5 minutes.
   - Anything else gets a 401, including Quo's legacy `openphone-signature`.
-  - It verifies and logs events, but doesn't ingest them yet. **Until it does, phone updates
-    hourly with the Actions run, not in real time.**
+  - Writes each text and call as it happens (new inbound, our reply, missed and answered calls),
+    through the same code as polling, so a thread updates in real time. Repeat deliveries are
+    recognised by `webhook-id` and ignored. The hourly poll is the backstop and changes nothing
+    the webhook already recorded.
+  - **Subscribe it in Quo** (a human step): `POST https://api.quo.com/webhooks` with header
+    `Quo-Api-Version: 2026-03-30`, the URL `https://<console host>/hooks/quo`, and the events
+    `message.received`, `message.delivered`, `message.undelivered`, `message.failed`,
+    `call.completed`, `call.missed`. Put the returned `whsec_…` secret in
+    `wrangler secret put QUO_WEBHOOK_SECRET`.
 
 ## Setup
 
