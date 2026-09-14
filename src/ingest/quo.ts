@@ -59,10 +59,10 @@ export const QUO_LIMITS = {
 
 /**
  * Worst-case D1 statements to sync one conversation before its waits are known:
- * syncThread SELECT + INSERT/UPDATE + reopen/unblock log, clearFailure, and
- * recordFailure's 2 if it fails. Each completed wait adds one response row.
+ * syncThread SELECT + INSERT/UPDATE + clearing waits_pending on a new thread +
+ * reopen/unblock log, clearFailure, and recordFailure's 2 if it fails. Each completed wait adds one response row.
  */
-const CONVERSATION_QUERIES = 6;
+const CONVERSATION_QUERIES = 7;
 const CONVERSATION_FETCHES = 2 * QUO_LIMITS.pagesPerConversation;
 /** First poll for a source reads this far back. Matches Gmail's 30-day window. */
 const BACKFILL_SECONDS = 30 * 86400;

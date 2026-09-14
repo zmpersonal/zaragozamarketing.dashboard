@@ -61,11 +61,11 @@ export const GMAIL_LIMITS = {
 
 /**
  * Worst-case D1 queries to sync one thread, before its reply count is known:
- * SELECT + INSERT/UPDATE + reopen/unblock log + known_sender upsert + clearFailure,
- * plus recordFailure's 2 if it fails. Each reply in the thread can add one
+ * SELECT + INSERT/UPDATE + clearing waits_pending on a new thread + reopen/unblock
+ * log + known_sender upsert + clearFailure, plus recordFailure's 2 if it fails. Each reply in the thread can add one
  * response row on top; that is checked once the thread is fetched.
  */
-const THREAD_QUERIES = 7;
+const THREAD_QUERIES = 8;
 /** Per mailbox, outside the thread loop: 2 exemption reads + 1 cursor write. */
 const MAILBOX_QUERIES = 3;
 /** Per mailbox, outside the thread loop: token + at most 3 listing calls (history pages or profile + list, + one catch-up page). */

@@ -5,8 +5,22 @@
  * rules in lib/thread-state.ts, then writes it back conditionally: the
  * UPDATE only applies if status, awaiting_since, last_inbound_at and
  * last_outbound_at are still what we read. If an agent changed the thread in between, the
- * write is skipped and the next cron run resolves again from fresh data,
+ * write is skipped and the next ingest run resolves again from fresh data,
  * so ingest can never clobber a status a human just set.
+ *
+ * Write order (round 10): a sync can die between any two writes, and a D1
+ * REST batch is not documented as atomic. Response rows are computed from the
+ * state *before* the thread write, so they must never be lost to a thread row
+ * that has already moved on:
+ *   - existing thread: response rows first (INSERT OR IGNORE), then the
+ *     thread UPDATE. Dying in between leaves the thread unchanged, so the next
+ *     sync computes the same waits (ignored as duplicates) and updates.
+ *   - new thread: the thread must exist first (response rows reference it),
+ *     so it is inserted with waits_pending = 1, then its rows are written,
+ *     then the flag is cleared. A later sync that finds the flag set records
+ *     the waits in its observation again before anything else.
+ * Only the reopened / unblocked action log can be lost to a kill (after the
+ * UPDATE); it is a log line, not a measurement.
  */
 import { completedWaits, resolveState, type Existing, type Observed } from '../lib/thread-state.ts';
 import { businessMinutes } from '../lib/clock.ts';
@@ -27,8 +41,7 @@ export function responseInsert(
   ).bind(threadId, awaitingSince, respondedAt, businessMinutes(awaitingSince, respondedAt), via, actor, now);
 }
 
-async function recordWaits(db: Db, threadId: string, existing: Existing | null, timeline: Observed[], now: number) {
-  const waits = completedWaits(existing, timeline);
+async function insertWaits(db: Db, threadId: string, waits: { awaiting_since: number; responded_at: number }[], now: number) {
   if (!waits.length) return;
   await db.batch(waits.map((w) => responseInsert(db, threadId, w.awaiting_since, w.responded_at, 'message', 'system', now)));
 }
@@ -59,29 +72,45 @@ export type SyncResult = 'inserted' | 'updated' | 'reopened' | 'unblocked' | 'sk
 
 export async function syncThread(db: Db, o: ThreadObservation, now: number): Promise<SyncResult> {
   const existing = await db
-    .prepare('SELECT status, last_inbound_at, last_outbound_at, awaiting_since FROM thread WHERE id = ?1')
+    .prepare('SELECT status, last_inbound_at, last_outbound_at, awaiting_since, waits_pending FROM thread WHERE id = ?1')
     .bind(o.id)
-    .first<Existing>();
+    .first<Existing & { waits_pending: number }>();
   const state = resolveState(existing, o.timeline);
 
   if (!existing) {
+    const waits = completedWaits(null, o.timeline);
     const res = await db.prepare(`
       INSERT INTO thread (
         id, source_id, brand_id, channel, subject, customer_name, customer_handle,
         preview, status, is_automated, conversation_started_at, last_inbound_at,
-        last_outbound_at, awaiting_since, triage, triage_score, triage_signals
-      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14, COALESCE(?15, 'customer'), COALESCE(?16, 0), ?17)
+        last_outbound_at, awaiting_since, triage, triage_score, triage_signals, waits_pending
+      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14, COALESCE(?15, 'customer'), COALESCE(?16, 0), ?17, ?18)
       ON CONFLICT(id) DO NOTHING
     `).bind(
       o.id, o.source_id, o.brand_id, o.channel, o.subject, o.customer_name, o.customer_handle,
       o.preview, state.status, o.is_automated ?? 0, o.conversation_started_at,
       o.newest_inbound_at ?? o.conversation_started_at, o.newest_outbound_at, state.awaiting_since,
       o.triage?.tier ?? null, o.triage?.score ?? null, o.triage ? JSON.stringify(o.triage.signals) : null,
+      waits.length ? 1 : 0,
     ).run();
     if (res.meta.changes === 0) return 'skipped';
-    await recordWaits(db, o.id, null, o.timeline, now);
+    if (waits.length) {
+      await insertWaits(db, o.id, waits, now);
+      await db.prepare('UPDATE thread SET waits_pending = 0 WHERE id = ?1').bind(o.id).run();
+    }
     return 'inserted';
   }
+
+  // A previous sync inserted this thread and died before writing its response
+  // rows: record the waits this observation shows (duplicates are ignored).
+  if (existing.waits_pending) {
+    await insertWaits(db, o.id, completedWaits(null, o.timeline), now);
+    await db.prepare('UPDATE thread SET waits_pending = 0 WHERE id = ?1').bind(o.id).run();
+  }
+
+  // Response rows before the thread moves on (see the note at the top).
+  await insertWaits(db, o.id, completedWaits(existing, o.timeline), now);
+
 
   // conversation_started_at is deliberately absent: it never changes after insert.
   const res = await db.prepare(`
@@ -120,7 +149,6 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
   ).run();
 
   if (res.meta.changes === 0) return 'skipped';
-  await recordWaits(db, o.id, existing, o.timeline, now);
 
   if (state.reopened) {
     await db.prepare(

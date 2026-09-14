@@ -66,7 +66,11 @@ CREATE TABLE IF NOT EXISTS thread (
   -- A new inbound on a closed thread reopens it and sets this to that message.
   awaiting_since    INTEGER,
 
-  is_automated    INTEGER NOT NULL DEFAULT 0,  -- answered by chat AI, not a human
+  is_automated    INTEGER NOT NULL DEFAULT 0,
+  -- 1 between inserting a new thread and writing the response rows its first
+  -- observation ended. A sync that dies in between leaves it set, and the next
+  -- sync records those rows before anything else (db/threads.ts).
+  waits_pending   INTEGER NOT NULL DEFAULT 0,  -- answered by chat AI, not a human
 
   -- triage: three tiers, and nothing is ever hidden in any of them.
   triage          TEXT NOT NULL DEFAULT 'customer',

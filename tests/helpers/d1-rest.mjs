@@ -17,9 +17,10 @@ export const QUERY_URL = `https://api.cloudflare.com/client/v4/accounts/${ACCOUN
  *   | { statementFailed: true } (HTTP 200, but the statement's own success is false)
  * api.requests: every request body received (parsed), with its auth header.
  * api.stringifyParams: simulate an API that turns every param into a string.
+ * api.atomicBatch = false: simulate a batch that commits each statement as it goes.
  */
 export function makeD1Rest(db = makeD1()) {
-  const api = { db, requests: [], failures: [], stringifyParams: false };
+  const api = { db, requests: [], failures: [], stringifyParams: false, atomicBatch: true };
   const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
   const error = (status, message, code = 7500) => json({ success: false, errors: [{ code, message }], messages: [], result: [] }, status);
 
@@ -48,6 +49,12 @@ export function makeD1Rest(db = makeD1()) {
     if (scripted?.statementFailed) return json({ success: true, errors: [], messages: [], result: [{ success: false, results: [], meta: { changes: 0 } }] });
 
     const statements = body.batch ?? [{ sql: body.sql, params: body.params }];
+    if (!api.atomicBatch) {
+      const result = [];
+      try { for (const s of statements) result.push(exec(s.sql, s.params ?? [])); }
+      catch (err) { return error(400, `${err.message}: SQLITE_ERROR`); }
+      return json({ success: true, errors: [], messages: [], result });
+    }
     db.raw.exec('BEGIN');
     try {
       const result = statements.map((s) => exec(s.sql, s.params ?? []));
