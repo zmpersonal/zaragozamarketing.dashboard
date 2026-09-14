@@ -2,7 +2,7 @@
 // the documented event payloads (www.quo.com/docs/2026-03-30/webhooks-event-payloads,
 // read round 10), and a way to turn a fake Quo account's activity into the
 // events Quo would have sent, so webhook and polling can be compared.
-import worker from '../../src/index.ts';
+import worker from '../../src/hooks.ts';
 import { PHONE } from './quo.mjs';
 
 export const WEBHOOK_SECRET = 'whsec_' + Buffer.from('round-10-webhook-signing-key-0123456789').toString('base64');

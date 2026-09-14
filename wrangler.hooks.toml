@@ -1,0 +1,19 @@
+# inhouse-ops-hooks: the Quo webhook Worker. No Cloudflare Access here: Access
+# on a Worker covers all its paths and Quo can't sign in, so the webhook can't
+# live on the console Worker once Access is on. It trusts only the Standard
+# Webhooks signature (src/lib/quo-signature.ts). Same D1 database as the console.
+name = "inhouse-ops-hooks"
+account_id = "0ef0279e4af302865cd2009458864c1b"
+main = "src/hooks.ts"
+compatibility_date = "2026-08-01"
+workers_dev = true
+# A preview URL is another hostname; keep only the one we configure.
+preview_urls = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "inhouse-ops"
+database_id = "4f562bdf-560b-4c82-a84e-554aa8c2bcb7"
+
+# Secret (wrangler secret put QUO_WEBHOOK_SECRET -c wrangler.hooks.toml):
+#   QUO_WEBHOOK_SECRET  whsec_... key returned by POST https://api.quo.com/webhooks

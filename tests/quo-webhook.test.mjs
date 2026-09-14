@@ -9,7 +9,7 @@
 // Anything else, including the legacy openphone-signature header, is a 401.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import worker from '../src/index.ts';
+import worker from '../src/hooks.ts';
 import { makeD1 } from './helpers/d1.mjs';
 
 // Includes bytes >= 0x80: the key must be used as raw bytes.

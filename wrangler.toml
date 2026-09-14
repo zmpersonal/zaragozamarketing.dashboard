@@ -2,6 +2,9 @@ name = "inhouse-ops"
 account_id = "0ef0279e4af302865cd2009458864c1b"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
+workers_dev = true
+# Cloudflare Access protects this Worker; a preview URL would be another hostname to protect.
+preview_urls = false
 
 [assets]
 directory = "./public"
@@ -13,16 +16,16 @@ database_name = "inhouse-ops"
 database_id = "4f562bdf-560b-4c82-a84e-554aa8c2bcb7"
 
 # No cron triggers: ingest runs on GitHub Actions (.github/workflows/ingest.yml),
-# writing to this database through the D1 REST API. The Worker serves the UI,
-# the API and the Quo webhook only.
+# writing to this database through the D1 REST API. This Worker serves the UI and
+# the API, behind Cloudflare Access. The Quo webhook is a separate Worker:
+# wrangler.hooks.toml.
 
 [vars]
 ACCESS_TEAM = "CHANGE_ME"           # <team>.cloudflareaccess.com
 ACCESS_AUD  = "CHANGE_ME"           # Access app audience tag
 OWNERS      = "you@inhousewellness.com"
 
-# Worker secret — set with `wrangler secret put NAME`, never in this file:
-#   QUO_WEBHOOK_SECRET      (whsec_... key returned by POST /webhooks, Quo-Api-Version 2026-03-30)
+# This Worker has no secrets. QUO_WEBHOOK_SECRET belongs to the hooks Worker (wrangler.hooks.toml).
 #
 # The ingest credentials are NOT Worker secrets any more. They live in GitHub
 # Actions secrets for .github/workflows/ingest.yml:

@@ -4,6 +4,7 @@ node_modules/
 .wrangler/
 .DS_Store
 dist/
+dist-hooks/
 
 # Credentials: service-account keys live outside the repo. Belt and braces.
 secrets/

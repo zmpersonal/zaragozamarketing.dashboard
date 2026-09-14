@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
+import hooks from '../src/hooks.ts';
 import { makeApiEnv, withAccess, mintToken, insertThread } from './helpers/access.mjs';
 
 const ORIGIN = 'https://console.example';
@@ -73,7 +74,7 @@ test('reads are not affected, and the Quo webhook is signature-checked, not orig
   const token = await mintToken();
   const res = await withAccess(() => worker.fetch(new Request(`${ORIGIN}/api/queue`, { headers: { 'Cf-Access-Jwt-Assertion': token } }), e));
   assert.equal(res.status, 200);
-  const hook = await worker.fetch(new Request(`${ORIGIN}/hooks/quo`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' }), { ...e, QUO_WEBHOOK_SECRET: 'whsec_AAAA' });
+  const hook = await hooks.fetch(new Request(`${ORIGIN}/hooks/quo`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' }), { ...e, QUO_WEBHOOK_SECRET: 'whsec_AAAA' });
   assert.equal(hook.status, 401, 'webhook rejects for its signature, not a 403/415');
 });
 

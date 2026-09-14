@@ -1,8 +1,8 @@
 /**
  * InHouse / THI support console — Cloudflare Worker
  *
- * Serves the dashboard, the API and the Quo webhook, which writes phone activity
- * as it happens. Scheduled ingest (Gmail, and Quo polling as the backstop) runs
+ * Serves the dashboard and the API, behind Cloudflare Access. The Quo webhook
+ * runs as a separate Worker (src/hooks.ts). Scheduled ingest (Gmail, and Quo polling as the backstop) runs
  * hourly on GitHub Actions (scripts/ingest.mjs) against the same D1 database
  * over the REST API. No dependency on any AI provider.
  */
@@ -10,15 +10,12 @@
 import { rescueThread, responseInsert } from './db/threads.ts';
 import type { Db } from './db/db.ts';
 import { listFailures } from './db/failures.ts';
-import { verifyQuoWebhook, webhookHeaders } from './lib/quo-signature.ts';
-import { ingestQuoWebhookEvent } from './ingest/quo.ts';
 
 export interface Env {
   DB: D1Database;
   ACCESS_AUD: string;      // Cloudflare Access application audience tag
   ACCESS_TEAM: string;     // e.g. "inhouse" for inhouse.cloudflareaccess.com
   OWNERS: string;          // comma-separated emails that get the owner view
-  QUO_WEBHOOK_SECRET: string;    // whsec_... signing key returned when the webhook is created (Standard Webhooks)
   ASSETS: Fetcher;
 }
 
@@ -255,9 +252,10 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
 
-    // Inbound webhooks authenticate by signature, not by Access.
-    if (url.pathname === '/hooks/quo') {
-      return handleQuoWebhook(req, env);
+    // The Quo webhook is not served here: this Worker sits behind Cloudflare
+    // Access, which can't exempt a path. It runs as its own Worker (src/hooks.ts).
+    if (url.pathname.startsWith('/hooks/')) {
+      return json({ error: 'Webhooks are served by the inhouse-ops-hooks Worker' }, 404);
     }
 
     if (!url.pathname.startsWith('/api/')) {
@@ -429,56 +427,3 @@ export default {
     return json({ error: 'No such route' }, 404);
   },
 };
-
-/**
- * Public endpoint: nothing in the body is trusted until its Standard Webhooks
- * signature verifies (lib/quo-signature.ts). Anything else, including the
- * legacy openphone-signature header, gets a 401. Fails closed if the signing
- * secret is not configured.
- */
-async function handleQuoWebhook(req: Request, env: Env): Promise<Response> {
-  if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
-
-  // Read the raw text once: the signature covers these exact bytes.
-  const raw = await req.text();
-
-  if (!env.QUO_WEBHOOK_SECRET) {
-    console.error('QUO_WEBHOOK_SECRET is not set; rejecting Quo webhook');
-    return json({ error: 'Invalid signature' }, 401);
-  }
-  const verified = await verifyQuoWebhook(
-    webhookHeaders(req.headers), raw, env.QUO_WEBHOOK_SECRET, Math.floor(Date.now() / 1000),
-  );
-  if (!verified) return json({ error: 'Invalid signature' }, 401);
-
-  let event: { type?: string };
-  try {
-    event = JSON.parse(raw);
-  } catch {
-    return json({ error: 'Body is not JSON' }, 400);
-  }
-
-  // webhook-id is stable across Quo's retries: a delivery already processed is
-  // acknowledged and not processed again. It is recorded only after processing
-  // succeeds, so a delivery that failed here is processed when Quo retries it.
-  const webhookId = req.headers.get('webhook-id') as string; // verified present above
-  const seen = await env.DB.prepare('SELECT 1 AS seen FROM webhook_delivery WHERE webhook_id = ?1').bind(webhookId).first();
-  if (seen) return json({ ok: true, result: 'duplicate' });
-
-  const at = Math.floor(Date.now() / 1000);
-  let result: 'synced' | 'ignored' | 'malformed';
-  try {
-    result = await ingestQuoWebhookEvent(env.DB, event, at);
-  } catch (err) {
-    console.error(`quo webhook ${webhookId} (${event.type}) failed; Quo will retry`, err);
-    return json({ error: 'Could not record the event' }, 500);
-  }
-  if (result === 'malformed') return json({ error: 'Malformed event' }, 400);
-
-  await env.DB.batch([
-    env.DB.prepare('INSERT OR IGNORE INTO webhook_delivery (webhook_id, event_type, received_at) VALUES (?1, ?2, ?3)')
-      .bind(webhookId, event.type ?? null, at),
-    env.DB.prepare('DELETE FROM webhook_delivery WHERE received_at < ?1').bind(at - 7 * 86400),
-  ]);
-  return json({ ok: true, result });
-}
