@@ -48,7 +48,8 @@ test('realistic mix: every Needs-reply thread comes back, however much older spa
   const ids = new Set(body.threads.map((t) => t.id));
   for (let i = 0; i < 45; i++) assert.ok(ids.has(`gmail:c${i}`), `customer thread c${i} missing from the queue`);
   assert.deepEqual(body.tiers.customer, { shown: 45, total: 45 });
-  assert.deepEqual(body.tiers.bulk, { shown: 60, total: 60 });
+  // Round 11: tiers are paged at QUEUE_LIMITS (50); this line used to expect all 60 under the old 200-row limit.
+  assert.deepEqual(body.tiers.bulk, { shown: QUEUE_LIMITS.bulk, total: 60 });
   assert.deepEqual(body.tiers.spam, { shown: QUEUE_LIMITS.spam, total: spam }, 'spam is cut, and says so');
 });
 
