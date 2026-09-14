@@ -41,6 +41,40 @@ const now = () => Math.floor(Date.now() / 1000);
  */
 const CONTACT_KINDS = new Set(['replied', 'called']);
 
+/** What an agent can log through POST /api/actions. System kinds (reopened, unblocked, deleted, rescued) are not accepted. */
+const ACTION_KINDS = new Set(['replied', 'called', 'note', 'escalated']);
+const AGENT_STATUSES = new Set(['waiting', 'answered', 'blocked', 'closed']);
+const BLOCKED_ON = new Set(['customer', 'supplier', 'refund', 'shipping', 'owner', 'other']);
+
+/**
+ * Writes accept only same-origin JSON. A cross-site page can make the browser
+ * send the Access cookie with a form POST (any content type a form allows) or a
+ * "simple" fetch, so every POST must carry Content-Type application/json (which
+ * a cross-site request can't send without a CORS preflight we never answer) and
+ * an Origin equal to ours; Sec-Fetch-Site, when present, must be same-origin.
+ */
+function writeRefusal(req: Request, url: URL): Response | null {
+  const type = (req.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+  if (type !== 'application/json') return json({ error: 'Content-Type must be application/json' }, 415);
+  if (req.headers.get('origin') !== url.origin) return json({ error: 'Cross-origin request refused' }, 403);
+  const site = req.headers.get('sec-fetch-site');
+  if (site !== null && site !== 'same-origin') return json({ error: 'Cross-site request refused' }, 403);
+  return null;
+}
+
+/** The request body as a JSON object, or null when it isn't one. */
+async function jsonObject(req: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const v = await req.json();
+    return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+const threadExists = async (env: Env, id: string) =>
+  !!(await env.DB.prepare('SELECT 1 AS ok FROM thread WHERE id = ?1').bind(id).first());
+
 /**
  * Identity comes from the Cloudflare Access JWT, which Access has already
  * validated at the edge before the request reaches us. We verify the
@@ -213,6 +247,11 @@ export default {
     const path = url.pathname.slice(5);
     const mine = user.role === 'agent' || url.searchParams.get('mine') === '1';
 
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      const refused = writeRefusal(req, url);
+      if (refused) return refused;
+    }
+
     // --- reads -------------------------------------------------
     if (req.method === 'GET' && path === 'board') {
       // ingest_failures: items ingest could not sync, including skipped ones, so a stuck record is visible.
@@ -225,7 +264,8 @@ export default {
       return json({ todos: await todos(env, user, mine) });
     }
     if (req.method === 'GET' && path.startsWith('threads/')) {
-      const id = path.slice(8);
+      let id: string;
+      try { id = decodeURIComponent(path.slice(8)); } catch { return json({ error: 'Bad thread id' }, 400); }
       const thread = await env.DB.prepare('SELECT * FROM thread WHERE id = ?1')
         .bind(id).first();
       if (!thread) return json({ error: 'No such thread' }, 404);
@@ -237,11 +277,18 @@ export default {
 
     // --- writes: the agent's "input actions and responses" -----
     if (req.method === 'POST' && path === 'actions') {
-      const b = await req.json<{
-        thread_id: string; kind: string; body?: string;
-        status?: string; blocked_on?: string; blocked_note?: string;
-      }>();
-      if (!b.thread_id || !b.kind) return json({ error: 'thread_id and kind required' }, 400);
+      const raw = await jsonObject(req);
+      if (!raw) return json({ error: 'Body must be a JSON object' }, 400);
+      const b = raw as {
+        thread_id: string; kind: string; body?: string | null;
+        status?: string | null; blocked_on?: string | null; blocked_note?: string | null;
+      };
+      if (typeof b.thread_id !== 'string' || !b.thread_id) return json({ error: 'thread_id required' }, 400);
+      if (typeof b.kind !== 'string' || !ACTION_KINDS.has(b.kind)) return json({ error: `kind must be one of ${[...ACTION_KINDS].join(', ')}` }, 400);
+      if (b.status != null && !AGENT_STATUSES.has(b.status)) return json({ error: `status must be one of ${[...AGENT_STATUSES].join(', ')}` }, 400);
+      if (b.blocked_on != null && !BLOCKED_ON.has(b.blocked_on)) return json({ error: `blocked_on must be one of ${[...BLOCKED_ON].join(', ')}` }, 400);
+      if (b.body != null && typeof b.body !== 'string') return json({ error: 'body must be text' }, 400);
+      if (!(await threadExists(env, b.thread_id))) return json({ error: 'No such thread' }, 404);
 
       const at = now();
       // Typed as Db: the binding satisfies the same interface ingest uses over HTTP.
@@ -319,11 +366,11 @@ export default {
     }
 
     if (req.method === 'POST' && path === 'todos') {
-      const b = await req.json<{
-        title: string; detail?: string; brand_id?: string;
-        thread_id?: string; assignee?: string; due_at?: number;
-      }>();
-      if (!b.title) return json({ error: 'title required' }, 400);
+      const raw = await jsonObject(req);
+      if (!raw) return json({ error: 'Body must be a JSON object' }, 400);
+      const b = raw as { title?: unknown; detail?: string; brand_id?: string; thread_id?: string; assignee?: string; due_at?: number };
+      if (typeof b.title !== 'string' || !b.title) return json({ error: 'title required' }, 400);
+      if (b.thread_id != null && !(await threadExists(env, String(b.thread_id)))) return json({ error: 'No such thread' }, 404);
       await env.DB.prepare(
         `INSERT INTO todo (brand_id, thread_id, title, detail, assignee, due_at, created_by, created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)`
@@ -336,9 +383,10 @@ export default {
 
     if (req.method === 'POST' && path.startsWith('todos/') && path.endsWith('/done')) {
       const id = path.slice(6, -5);
-      await env.DB.prepare('UPDATE todo SET done_at = ?2 WHERE id = ?1')
-        .bind(id, now()).run();
-      return json({ ok: true });
+      if (!/^\d+$/.test(id)) return json({ error: 'No such to-do' }, 404);
+      const res = await env.DB.prepare('UPDATE todo SET done_at = ?2 WHERE id = ?1')
+        .bind(Number(id), now()).run();
+      return res.meta.changes ? json({ ok: true }) : json({ error: 'No such to-do' }, 404);
     }
 
     return json({ error: 'No such route' }, 404);

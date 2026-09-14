@@ -300,6 +300,7 @@
 
 <script type="module">
 import { sectionThreads, renderSection, headerCounts, brandCell } from './queue-sections.mjs';
+import { esc, threadHeaderHtml, historyHtml, todoRowHtml, matrixCellHtml } from './render.mjs';
 
 // ---------------------------------------------------------------
 // Mock data. Delete MOCK and flip USE_API once D1 is seeded —
@@ -477,11 +478,12 @@ function renderMatrix() {
       const td = document.createElement('td');
       const btn = document.createElement('button');
       btn.className = 'cell' + (cell.length ? '' : ' quiet');
-      btn.innerHTML =
-        '<div class="count num">' + (cell.length || '—') + '</div>' +
-        '<div class="oldest">' + (oldest ? 'oldest ' + ageLabel(oldest) : cell.length ? 'none awaiting us' : 'clear') + '</div>' +
-        '<div class="heat"><span style="width:' + fill + '%;background:' +
-          heatColor(hrs) + '"></span></div>';
+      btn.innerHTML = matrixCellHtml({
+        count: cell.length || '—',
+        oldest: oldest ? 'oldest ' + ageLabel(oldest) : cell.length ? 'none awaiting us' : 'clear',
+        fill,
+        color: heatColor(hrs),
+      });
       btn.onclick = () => { state.brand = brand.id; state.filter = 'all'; render(); };
       btn.setAttribute('aria-label',
         cell.length + ' waiting on ' + channel + ' for ' + brand.name);
@@ -532,11 +534,7 @@ function renderPanel() {
 function threadDetail(t) {
   const frag = document.createElement('div');
   frag.className = 'section';
-  frag.innerHTML =
-    '<h3>' + esc(t.subject) + '</h3>' +
-    '<div class="sub">' + esc(t.customer_name ?? '') + ' · ' + esc(t.customer_handle ?? '') +
-      ' · ' + brandName(t.brand_id) + '</div>' +
-    '<p style="font-size:13px;color:var(--steam);margin:10px 0 0">' + esc(t.preview ?? '') + '</p>';
+  frag.innerHTML = threadHeaderHtml(t, { brandName });
 
   // --- log an action -------------------------------------------
   const form = document.createElement('div');
@@ -599,13 +597,7 @@ function threadDetail(t) {
   const history = document.createElement('div');
   history.className = 'section';
   const log = state.actions[t.id] ?? [];
-  history.innerHTML = '<div class="label">History</div>' +
-    (log.length
-      ? '<div class="log">' + log.map((a) =>
-          '<article><div class="when">' + esc(a.actor.split('@')[0]) + ' · ' +
-            a.kind + ' · ' + ageLabel(a.created_at) + ' ago</div>' +
-          '<p>' + esc(a.body ?? '') + '</p></article>').join('') + '</div>'
-      : '<p class="sub">Nothing logged yet.</p>');
+  history.innerHTML = historyHtml(log, { ageLabel });
 
   const box = document.createElement('div');
   box.append(frag, form, history);
@@ -629,12 +621,10 @@ function todoList() {
     const overdue = td.due_at && td.due_at < NOW();
     const row = document.createElement('div');
     row.className = 'todo' + (overdue ? ' overdue' : '');
-    row.innerHTML =
-      '<input type="checkbox" aria-label="Mark done">' +
-      '<div><div class="t">' + esc(td.title) + '</div>' +
-      '<div class="d">' + brandName(td.brand_id) +
-        (td.due_at ? ' · due ' + (overdue ? ageLabel(td.due_at) + ' ago' : 'in ' + ageLabel(td.due_at)) : '') +
-      '</div></div>';
+    row.innerHTML = todoRowHtml(td, {
+      brandName,
+      dueText: td.due_at ? ' · due ' + (overdue ? ageLabel(td.due_at) + ' ago' : 'in ' + ageLabel(td.due_at)) : '',
+    });
     row.querySelector('input').onchange = async () => {
       if (USE_API) await api('todos/' + td.id + '/done', { method: 'POST' });
       state.todos = state.todos.filter((x) => x.id !== td.id);
@@ -664,8 +654,6 @@ function todoList() {
 }
 
 // ---------------------------------------------------------------
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const brandName = (id) => BRANDS.find((b) => b.id === id)?.name ?? '—';
 
 function render() {

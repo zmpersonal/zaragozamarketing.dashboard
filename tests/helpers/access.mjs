@@ -59,12 +59,13 @@ export async function withAccess(fn) {
   try { return await fn(); } finally { globalThis.fetch = realFetch; }
 }
 
-/** An /api request, authenticated by header token unless opts.cookie is set. */
+/** An /api request, authenticated by header token unless opts.cookie is set. Writes are same-origin JSON, as the UI sends them. */
 export function apiRequest(path, { token, cookie, method = 'GET', body } = {}) {
   const headers = {};
   if (token) headers['Cf-Access-Jwt-Assertion'] = token;
   if (cookie) headers.cookie = `other=1; CF_Authorization=${cookie}`;
-  if (body !== undefined) headers['content-type'] = 'application/json';
+  if (body !== undefined || method !== 'GET') headers['content-type'] = 'application/json';
+  if (method !== 'GET') headers.origin = 'https://console.example';
   return new Request(`https://console.example/api/${path}`, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
   });
