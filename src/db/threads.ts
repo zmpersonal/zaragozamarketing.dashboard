@@ -133,7 +133,9 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
       -- the classifier never overrides a human's triage call
       triage           = CASE WHEN triage_by IS NULL AND ?16 IS NOT NULL THEN ?16 ELSE triage END,
       triage_score     = CASE WHEN triage_by IS NULL AND ?16 IS NOT NULL THEN ?17 ELSE triage_score END,
-      triage_signals   = CASE WHEN triage_by IS NULL AND ?16 IS NOT NULL THEN ?18 ELSE triage_signals END
+      triage_signals   = CASE WHEN triage_by IS NULL AND ?16 IS NOT NULL THEN ?18 ELSE triage_signals END,
+      -- back in the queue (a new inbound on a deleted thread): no longer deleted
+      deleted_at       = CASE WHEN ?9 IN ('waiting','answered','blocked') THEN NULL ELSE deleted_at END
     WHERE id = ?1
       AND status = ?11
       AND awaiting_since IS ?12
@@ -153,7 +155,7 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
   if (state.reopened) {
     await db.prepare(
       `INSERT INTO action (thread_id, actor, kind, body, created_at) VALUES (?1, 'system', 'reopened', ?2, ?3)`
-    ).bind(o.id, 'New inbound message after the thread was closed.', now).run();
+    ).bind(o.id, `New inbound message after the thread was ${existing.status}.`, now).run();
     return 'reopened';
   }
   if (state.unblocked) {
@@ -182,5 +184,28 @@ export async function rescueThread(db: Db, threadId: string, actor: string, now:
       `INSERT INTO action (thread_id, actor, kind, body, created_at) VALUES (?1, ?2, 'rescued', NULL, ?3)`
     ).bind(threadId, actor, now),
   ]);
+  return true;
+}
+
+/**
+ * The mail behind a thread was deleted in Gmail (Delete forever, an emptied
+ * Trash, or Gmail's 30-day spam purge). It leaves the queue as 'deleted', with
+ * its clock stopped. This is not an answer: no response row, no outbound time,
+ * so the admin report never counts it as a reply. A closed thread stays closed
+ * and is only stamped. Idempotent: a thread already marked is left alone.
+ */
+export async function markThreadDeleted(db: Db, threadId: string, now: number): Promise<boolean> {
+  const res = await db.prepare(`
+    UPDATE thread SET
+      status         = CASE WHEN status = 'closed' THEN status ELSE 'deleted' END,
+      awaiting_since = CASE WHEN status = 'closed' THEN awaiting_since ELSE NULL END,
+      blocked_since  = NULL,
+      deleted_at     = ?2
+    WHERE id = ?1 AND deleted_at IS NULL
+  `).bind(threadId, now).run();
+  if (res.meta.changes === 0) return false;
+  await db.prepare(
+    `INSERT INTO action (thread_id, actor, kind, body, created_at) VALUES (?1, 'system', 'deleted', ?2, ?3)`
+  ).bind(threadId, 'The mail was deleted in Gmail. Removed from the queue; not counted as a reply.', now).run();
   return true;
 }

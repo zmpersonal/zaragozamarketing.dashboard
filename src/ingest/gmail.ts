@@ -27,7 +27,7 @@
 import type { Db, IngestEnv } from '../db/db.ts';
 import { emailOf } from '../lib/triage.ts';
 import type { Observed } from '../lib/thread-state.ts';
-import { syncThread } from '../db/threads.ts';
+import { markThreadDeleted, syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure } from '../db/failures.ts';
 import { GMAIL_READONLY, parseServiceAccount, serviceAccountToken, type ServiceAccountKey } from '../lib/google-auth.ts';
 import { classify, type Exemptions } from '../lib/triage.ts';
@@ -142,6 +142,8 @@ async function readHistory(budget: Budget, auth: Record<string, string>, cursor:
     const params: [string, string][] = [
       ['startHistoryId', cursor.historyId as string], ['maxResults', '500'],
       ['historyTypes', 'messageAdded'], ['historyTypes', 'labelAdded'], ['historyTypes', 'labelRemoved'],
+      // Permanent deletions, so a deleted customer thread leaves the queue (markThreadDeleted).
+      ['historyTypes', 'messageDeleted'],
     ];
     if (pageToken) params.push(['pageToken', pageToken]);
     const r = await gmailGet(budget, auth, 'history', params);
@@ -272,11 +274,17 @@ async function syncGmailThread(
   threadId: string, exemptions: Exemptions, budget: Budget,
 ) {
   const res = await budget.fetch(`${GMAIL}threads/${threadId}?format=metadata`, { headers: auth });
+  const now = Math.floor(Date.now() / 1000);
+  // Every message deleted (verified on support@, round 8: threads.get is 404).
+  if (res.status === 404) { await markThreadDeleted(env.DB, `gmail:${threadId}`, now); return; }
+  if (!res.ok) throw new Error(`Gmail threads.get -> ${res.status}`);
   const t = await res.json<any>();
+  if (!Array.isArray(t.messages)) throw new Error('Gmail thread without a messages array');
   // Drafts and chats are not conversation messages: a saved draft reply from
   // our address must never count as having replied.
-  const msgs = (t.messages ?? []).filter((m: any) => !(m.labelIds ?? []).some((l: string) => l === 'DRAFT' || l === 'CHAT'));
-  if (!msgs.length) return;
+  const msgs = t.messages.filter((m: any) => !(m.labelIds ?? []).some((l: string) => l === 'DRAFT' || l === 'CHAT'));
+  // Nothing left but drafts or chats: if we had ingested it, its mail was deleted.
+  if (!msgs.length) { await markThreadDeleted(env.DB, `gmail:${threadId}`, now); return; }
 
   const header = (m: any, name: string) =>
     m.payload.headers.find((h: any) => h.name.toLowerCase() === name)?.value ?? '';
@@ -292,7 +300,8 @@ async function syncGmailThread(
   // of the FIRST inbound message. Never the newest message, which may be
   // our own reply or a colleague cc'd in later.
   const firstIn = msgs.find(isInbound);
-  if (!firstIn) return; // nothing inbound: not a customer conversation
+  // Nothing inbound: not a customer conversation. If we had ingested it, the customer's mail was deleted.
+  if (!firstIn) { await markThreadDeleted(env.DB, `gmail:${threadId}`, now); return; }
 
   const customerFrom = header(firstIn, 'from');
 

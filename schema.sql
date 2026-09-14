@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS thread (
                   -- 'answered'  we replied, ball is in their court
                   -- 'blocked'   we replied but are stuck (see blocked_on)
                   -- 'closed'    done
+                  -- 'deleted'   the mail was deleted in Gmail; out of the queue,
+                  --             not an answer (no response row). Reopens like
+                  --             'closed' if the customer writes again.
   blocked_on      TEXT,                    -- 'customer' | 'supplier' | 'refund'
                                            -- | 'shipping' | 'owner' | 'other'
   blocked_note    TEXT,
@@ -70,7 +73,8 @@ CREATE TABLE IF NOT EXISTS thread (
   -- 1 between inserting a new thread and writing the response rows its first
   -- observation ended. A sync that dies in between leaves it set, and the next
   -- sync records those rows before anything else (db/threads.ts).
-  waits_pending   INTEGER NOT NULL DEFAULT 0,  -- answered by chat AI, not a human
+  waits_pending   INTEGER NOT NULL DEFAULT 0,
+  deleted_at      INTEGER,                 -- unix seconds ingest saw the mail deleted in Gmail  -- answered by chat AI, not a human
 
   -- triage: three tiers, and nothing is ever hidden in any of them.
   triage          TEXT NOT NULL DEFAULT 'customer',

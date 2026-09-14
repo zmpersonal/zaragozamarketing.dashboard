@@ -1,9 +1,3 @@
-// SKIPPED, ROUND 10: deleted-mail handling. These tests were written in round 9
-// (5 of 6 failing on the code at the time), then paused when the owner moved
-// the work to round 10. They are committed skipped so they are visible in the
-// repo rather than kept in a git stash. Round 10 implements the behaviour and
-// removes the skips.
-//
 // Mail deleted in Gmail (Delete forever, emptied Trash, or Gmail's own 30-day
 // spam purge) leaves the queue: the next incremental sync marks the thread
 // 'deleted'. That is not an answer: no response row, no outbound time, and
@@ -45,7 +39,7 @@ function mailbox() {
   };
 }
 
-test.skip('a waiting customer thread deleted in Gmail leaves the queue as deleted, and is not an answer', async () => {
+test('a waiting customer thread deleted in Gmail leaves the queue as deleted, and is not an answer', async () => {
   const env = makeEnv();
   const threads = mailbox();
   await run(env, threads);
@@ -75,7 +69,7 @@ test.skip('a waiting customer thread deleted in Gmail leaves the queue as delete
   assert.equal((await row(env, 'stays')).status, 'waiting', 'other threads untouched');
 });
 
-test.skip('only the customer message deleted, a draft reply left behind: nothing inbound remains, so deleted', async () => {
+test('only the customer message deleted, a draft reply left behind: nothing inbound remains, so deleted', async () => {
   const env = makeEnv();
   const threads = { d: [inbound(ago(2), 'Dana <dana@example.com>'), { ...outbound(ago(1)), labelIds: ['DRAFT'] }] };
   await run(env, threads);
@@ -87,7 +81,7 @@ test.skip('only the customer message deleted, a draft reply left behind: nothing
   assert.equal(one(env, 'SELECT COUNT(*) AS n FROM response').n, 0);
 });
 
-test.skip('one of two inbound messages deleted: the thread still exists and is still waiting', async () => {
+test('one of two inbound messages deleted: the thread still exists and is still waiting', async () => {
   const env = makeEnv();
   const threads = { two: [inbound(ago(3), 'Dana <dana@example.com>'), inbound(ago(1), 'Dana <dana@example.com>', 'Re: still broken')] };
   await run(env, threads);
@@ -98,7 +92,7 @@ test.skip('one of two inbound messages deleted: the thread still exists and is s
   assert.equal(t.deleted_at, null);
 });
 
-test.skip('a blocked thread deleted in Gmail leaves the blocked group; a closed one stays closed and is only stamped', async () => {
+test('a blocked thread deleted in Gmail leaves the blocked group; a closed one stays closed and is only stamped', async () => {
   const env = makeEnv();
   const threads = { b: [inbound(ago(3), 'B <b@example.com>')], c: [inbound(ago(3), 'C <c@example.com>')] };
   await run(env, threads);
@@ -117,7 +111,7 @@ test.skip('a blocked thread deleted in Gmail leaves the blocked group; a closed 
   assert.equal(one(env, 'SELECT COUNT(*) AS n FROM response').n, 0);
 });
 
-test.skip('a deleted thread that was never ingested is ignored, not recorded as a failure', async () => {
+test('a deleted thread that was never ingested is ignored, not recorded as a failure', async () => {
   const env = makeEnv();
   const threads = mailbox();
   await run(env, threads);
@@ -129,11 +123,22 @@ test.skip('a deleted thread that was never ingested is ignored, not recorded as 
   assert.equal(one(env, 'SELECT COUNT(*) AS n FROM ingest_failure').n, 0);
 });
 
-test.skip('state rules: a deleted thread stays deleted, and reopens like a closed one if the customer writes again', () => {
+test('state rules: a deleted thread stays deleted, and reopens like a closed one if the customer writes again', () => {
   const existing = { status: 'deleted', last_inbound_at: 100, last_outbound_at: null, awaiting_since: null };
   assert.deepEqual(resolveState(existing, [{ at: 100, inbound: true }]), { status: 'deleted', awaiting_since: null, reopened: false, unblocked: false });
   const r = resolveState(existing, [{ at: 100, inbound: true }, { at: 200, inbound: true }]);
   assert.equal(r.status, 'waiting');
   assert.equal(r.awaiting_since, 200);
   assert.equal(r.reopened, true);
+});
+
+test('a malformed Gmail response for a thread we have is a recorded failure, never a deletion', async () => {
+  const env = makeEnv();
+  const threads = mailbox();
+  await run(env, threads);
+  threads.gone = { raw: { snippet: 'x' } }; // 200, but no messages array
+  const errors = await run(env, threads);
+  assert.equal((await row(env, 'gone')).status, 'waiting', 'not deleted');
+  assert.equal(one(env, "SELECT failures FROM ingest_failure WHERE item_id = 'gmail:gone'").failures, 1);
+  assert.ok(errors.some((e) => e.includes('gone')), errors.join('\n'));
 });

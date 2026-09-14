@@ -27,7 +27,7 @@ export interface Existing {
 }
 
 export interface ResolvedState {
-  status: 'waiting' | 'answered' | 'blocked' | 'closed';
+  status: 'waiting' | 'answered' | 'blocked' | 'closed' | 'deleted';
   awaiting_since: number | null;
   /** closed -> open because of a new inbound */
   reopened: boolean;
@@ -114,10 +114,11 @@ export function completedWaits(existing: Existing | null, observed: Observed[]):
 export function resolveState(existing: Existing | null, observed: Observed[]): ResolvedState {
   const timeline = effectiveTimeline(existing, observed);
 
-  if (existing?.status === 'closed') {
+  // closed and deleted (mail deleted in Gmail) stay out of the queue until a new inbound.
+  if (existing?.status === 'closed' || existing?.status === 'deleted') {
     const fresh = chronological(timeline).filter((m) => m.at > existing.last_inbound_at);
     if (!fresh.some((m) => m.inbound)) {
-      return { status: 'closed', awaiting_since: null, reopened: false, unblocked: false };
+      return { status: existing.status, awaiting_since: null, reopened: false, unblocked: false };
     }
     const since = oldestUnanswered(fresh);
     return { status: since === null ? 'answered' : 'waiting', awaiting_since: since, reopened: true, unblocked: false };
