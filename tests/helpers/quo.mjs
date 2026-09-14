@@ -4,6 +4,9 @@
 // so the old code can run in a red test.
 import { makeD1 } from './d1.mjs';
 
+/** The real fetch, captured at load: an enclosing fake may take other hosts, the network never does. */
+const NATIVE_FETCH = globalThis.fetch;
+
 export const PHONE = 'PN1';
 export const SOURCE_ID = 'quo:PN1';
 export const CUSTOMER = '+15125550142';
@@ -84,7 +87,11 @@ export async function withQuo(account, fn, { pageSize = 100 } = {}) {
     const byActivity = Object.values(account.conversations)
       .sort((a, b) => Date.parse(b.lastActivityAt ?? b.createdAt) - Date.parse(a.lastActivityAt ?? a.createdAt));
 
-    if (url.origin !== 'https://api.quo.com') throw new Error('unexpected fetch in test: ' + url.href);
+    if (url.origin !== 'https://api.quo.com') {
+      account.requests.pop();
+      if (realFetch !== NATIVE_FETCH) return realFetch(input, init); // e.g. a fake Gmail around this one
+      throw new Error('unexpected fetch in test: ' + url.href);
+    }
 
     // v1, per the docs.
     if (url.pathname === '/v1/phone-numbers') {

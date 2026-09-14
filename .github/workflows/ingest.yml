@@ -1,0 +1,67 @@
+# Hourly ingest: Gmail and Quo into D1, over Cloudflare's D1 REST API.
+#
+# The Worker (free plan) serves the dashboard, the API and the Quo webhook;
+# ingest runs here because Workers Free caps a run at 50 outbound requests and
+# 10 ms of CPU. Email is checked roughly hourly. GitHub can delay scheduled runs
+# by 15-60 minutes under load.
+#
+# Minutes: GitHub Free allows 2,000 a month for a private repo. ~730 hourly runs;
+# a normal run takes well under a minute (1 billed minute), and the 2-minute job
+# timeout caps the worst case at 1,460. The ingest itself stops starting new work
+# at 80 seconds (scripts/_ingest-run.mjs), so a run is never cut off mid-write.
+name: Ingest
+
+on:
+  schedule:
+    # Off the top of the hour, when GitHub's scheduler is busiest.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # keepalive only: an empty commit after 45 quiet days
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # GitHub disables scheduled workflows after 60 days without a commit, silently.
+      # Runs first, so a failing or timed-out ingest can't skip it.
+      - name: Keepalive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          last=$(git log -1 --format=%ct)
+          quiet_days=$(( ($(date +%s) - last) / 86400 ))
+          if [ "$quiet_days" -lt 45 ]; then
+            echo "keepalive: last commit ${quiet_days} days ago, nothing to do"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --allow-empty -q -m "chore: keepalive for scheduled ingest (repo quiet ${quiet_days} days)"
+          remote="${KEEPALIVE_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
+          git push -q "$remote" "HEAD:${GITHUB_REF_NAME}" 2>&1 | sed "s#${GH_TOKEN}#***#g"
+          echo "keepalive: pushed an empty commit after ${quiet_days} quiet days"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Ingest Gmail and Quo into D1
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          QUO_API_KEY: ${{ secrets.QUO_API_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+        run: node scripts/ingest.mjs

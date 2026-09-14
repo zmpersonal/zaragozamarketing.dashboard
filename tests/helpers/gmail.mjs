@@ -7,6 +7,9 @@ import { SERVICE_ACCOUNT_JSON, TOKEN_URI, verifyAssertion, tokenResponse } from 
 
 export { SERVICE_ACCOUNT_JSON };
 
+/** The real fetch, captured at load: an enclosing fake may take other hosts, the network never does. */
+const NATIVE_FETCH = globalThis.fetch;
+
 export const MAILBOX = 'support@inhousewellness.com';
 export const SOURCE_ID = `gmail:${MAILBOX}`;
 
@@ -123,6 +126,10 @@ export async function withGmail(threads, fn, { onToken, onGmail, requests, pageS
       const body = String(init?.body ?? '');
       onToken?.(await verifyAssertion(body));
       return tokenResponse(body);
+    }
+    if (url.origin !== 'https://gmail.googleapis.com') {
+      if (realFetch !== NATIVE_FETCH) return realFetch(input, init); // e.g. a fake Quo or D1 API around this one
+      throw new Error('unexpected fetch in test: ' + url.href);
     }
     requests?.push(url);
     const headers = new Headers(init?.headers);
