@@ -1,11 +1,12 @@
 /**
  * Per-invocation subrequest budget.
  *
- * Cloudflare counts every fetch() AND every call to D1 as a subrequest, and
- * caps D1 queries separately (developers.cloudflare.com/workers/platform/limits,
- * /d1/platform/limits, read round 7):
- *   Workers Free:  50 subrequests, 50 D1 queries, 10 ms CPU per cron run
- *   Workers Paid:  10,000 subrequests, 1,000 D1 queries, 30 s CPU
+ * Cloudflare counts every fetch() AND every call to D1 as a subrequest
+ * (developers.cloudflare.com/workers/platform/limits, read round 8):
+ *   Workers Free:  50 external + 1,000 internal subrequests, 10 ms CPU per invocation
+ *   Workers Paid:  10,000 subrequests (configurable), 5 min CPU (15 min per cron invocation)
+ * D1 queries per invocation were read as 50 Free / 1,000 Paid in round 7; the
+ * defaults stay under 1,000. This app requires Workers Paid (CLAUDE.md, "Hosting cost").
  * Ingest asks canAfford() before each unit of work and stops early, leaving
  * the rest for the next run, instead of failing mid-write at the platform cap.
  */

@@ -13,9 +13,11 @@ The rules the code must never break are in `CLAUDE.md`. Open questions and known
 The stack was chosen to be cheap, secure, and still standing if every subscription lapses:
 
 - **Cloudflare Workers + D1 + static assets.** One Worker and one SQLite database. The Worker
-  serves the UI, the `/api` routes and `/hooks/quo`, and runs ingest on a 5-minute cron.
-  - Cost has not been verified against real volume. Gmail and Quo polling make many
-    subrequests per run (see HANDOFF, "Scale and cost").
+  serves the UI, the `/api` routes and `/hooks/quo`, and runs ingest on two 5-minute crons.
+- **Cost: the Workers Paid plan, $5/month minimum.** The free tier will not carry the ingest.
+  It allows 50 outbound requests and 10 ms of CPU per run, and Quo alone can need 122 requests
+  in one run. D1 on Free also fails once the daily row limits are passed. This was earlier
+  described as effectively free; that was wrong. See CLAUDE.md, "Hosting cost".
 - **Cloudflare Access for login.** There's no password table. Each person signs in as
   themselves, and the Worker verifies the Access JWT again (signature, expiry, audience,
   email) before trusting it.
@@ -87,6 +89,9 @@ produces a second measurement.
   - One bad thread is logged, recorded in `ingest_failure`, and skipped, and the rest sync.
 - **Cron:** Gmail runs on `*/5 * * * *`, Quo on `2-59/5 * * * *`, so each has its own budget.
 - **Quo** (`src/ingest/quo.ts`, Quo v1 API):
+  - Bounded like Gmail: each run lists at most 2 pages of conversations and reads at most 20,
+    inside the same fetch and query budget. The first scan reads 30 days back over as many runs
+    as it takes.
   - Reads every text and call created since a cursor stored per source, so an inbound that was
     answered before the next poll is still seen.
   - An answered call counts as contact; a missed call is waiting.
@@ -106,6 +111,7 @@ produces a second measurement.
 npm install
 npm run check && npm test && npm run build   # typecheck, tests, local dry-run bundle
 
+# The account must be on Workers Paid ($5/month) first. See "Why this stack".
 npx wrangler login
 npx wrangler d1 create inhouse-ops          # paste the id into wrangler.toml
 npx wrangler d1 execute inhouse-ops --file=./schema.sql --remote
@@ -145,7 +151,10 @@ npx wrangler d1 execute inhouse-ops --file=~/Code/secrets/inhouse-ops-sender-rul
 GOOGLE_SERVICE_ACCOUNT_FILE=~/Code/secrets/<key>.json \
   node prove/backfill-known-senders.mjs support@inhousewellness.com \
   --out ~/Code/secrets/inhouse-ops-known-senders.sql
-npx wrangler d1 execute inhouse-ops --file=~/Code/secrets/inhouse-ops-known-senders.sql --remote
+# drop our own colleagues (@inhousewellness.com); repeatable, safe to apply again
+node prove/apply-known-senders.mjs --in ~/Code/secrets/inhouse-ops-known-senders.sql \
+  --out ~/Code/secrets/inhouse-ops-known-senders.filtered.sql
+npx wrangler d1 execute inhouse-ops --file=~/Code/secrets/inhouse-ops-known-senders.filtered.sql --remote
 ```
 
 Once a database has real rows, schema changes need `wrangler d1 migrations`, because

@@ -13,6 +13,20 @@ It is one Cloudflare Worker (`src/index.ts`) with a D1 database (`schema.sql`) a
 on two 5-minute cron triggers (Gmail at :00/:05…, Quo two minutes later), so each gets its own
 subrequest budget. No AI provider sits in the critical path.
 
+**Hosting cost: this needs the Cloudflare Workers Paid plan, $5/month minimum per account.**
+The free tier will not carry it. Hosting was earlier described to Julian as effectively free;
+that was wrong, and it is recorded here so it isn't discovered at deploy. Why (Cloudflare docs,
+read round 8):
+- Free allows 50 external subrequests per invocation. Quo ingest alone can need 122 in one run
+  (see invariant 7), and Gmail up to 29.
+- Free allows 10 ms of CPU per invocation. Signing the Gmail service-account JWT, parsing
+  threads and running the SQLite work of a sync run won't reliably fit.
+- Since 1 September 2026, D1 queries on Free fail once the account passes its daily row read or
+  row write limit.
+Paid allows 10,000 subrequests and 5 minutes of CPU per invocation (15 minutes for a cron
+trigger). The ingest budget defaults (900 / 900) are sized for Paid, and tests assert they stay
+under its caps. Don't size anything for Free.
+
 ## Commands
 
 | Command | What it does |
@@ -226,9 +240,22 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
   - `GET /api/board` returns `ingest_failures`.
   - Tests: `tests/ingest-isolation.test.mjs`, `tests/quo-ingest.test.mjs`,
     `tests/poison-pill.test.mjs`.
-- **Every Quo inbound is observed.**
-  - Quo polling reads individual messages and calls created after `source.sync_cursor`, never
-    just a conversation's latest activity.
+- **Every Quo inbound is observed, in bounded runs** (round 8).
+  - Quo polling reads individual messages and calls created after the cursor, never just a
+    conversation's latest activity.
+  - `source.sync_cursor` is JSON `{highWater, scan}`. A scan lists conversations with activity
+    since `highWater` (30 days back on a source's first scan), at most
+    `QUO_LIMITS.listPagesPerRun` pages per run, and reads at most `conversationsPerRun`
+    conversations per run. The rest stays in the scan for the next run.
+  - `highWater` advances only when a scan completes with nothing held for retry, and it becomes
+    the scan's **start** time, never the newest event seen. A conversation read early in a
+    multi-run scan can get activity that is older than events read later.
+  - A `Budget` counts every fetch and D1 statement. A conversation that doesn't fit what is left
+    waits. One that could never fit a run, or has more than `pagesPerConversation` pages of
+    messages or calls, is recorded in `ingest_failure` like any failure, so it can't block the
+    queue.
+  - Worst case per source per run: 2 + 20 × 6 = 122 fetches; D1 1 + 20 × (6 + waits ended).
+  - Tests: `tests/quo-budget.test.mjs`, `tests/quo-ingest.test.mjs`.
   - The cursor advances unless a conversation failed and is still being retried.
   - The webhook is the fast path; polling is the backstop.
   - `prove/quo.mjs` uses the same exported helpers.
@@ -278,8 +305,9 @@ src/lib/quo-signature.ts  Quo webhook verification (Standard Webhooks)
 schema.sql                D1 schema + brand seed
 public/index.html         UI, mock data until USE_API = true
 prove/*.mjs               run-by-hand source proofs; need real credentials (Gmail: GOOGLE_SERVICE_ACCOUNT_FILE).
-                          Never in cron. backfill-known-senders.mjs (one-off) and ingest-live.mjs
-                          write customer data to files outside the repo only.
+                          Never in cron. backfill-known-senders.mjs (one-off), apply-known-senders.mjs
+                          (setup, filters our own domain) and ingest-live.mjs write customer data to
+                          files outside the repo only.
 seeds/*.example.sql       shape of setup seeds; real seeds live outside the repo
 tests/*.test.mjs          node:test suites; tests/helpers has the D1 shim, fake Gmail, fake
                           Quo v1 API, and an Access JWT minter

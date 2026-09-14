@@ -21,9 +21,9 @@ export interface Env {
   GOOGLE_SERVICE_ACCOUNT_JSON: string;
   QUO_API_KEY: string;
   QUO_WEBHOOK_SECRET: string;
-  /** Optional per-invocation ingest budget overrides (e.g. 45 / 45 on Workers Free). */
+  /** Optional per-invocation ingest budget overrides. Workers Paid is required; see CLAUDE.md "Hosting cost". */
   INGEST_MAX_SUBREQUESTS?: string;
-  INGEST_MAX_D1_QUERIES?: string;    // whsec_... signing key returned when the webhook is created (Standard Webhooks)
+  INGEST_MAX_D1_QUERIES?: string;
   ASSETS: Fetcher;
 }
 

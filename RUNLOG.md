@@ -5,6 +5,56 @@ still unproven.
 
 ---
 
+## Round 8 — deploy blockers: known senders, Quo budget, cost (2026-09-14, branch `claude/inh-round-8`, cut from `claude/inh-round-7`)
+
+Nothing was deployed, merged, pushed, or PR'd. No history was rewritten.
+
+### What changed
+1. **`prove/apply-known-senders.mjs`:** takes the sent-mail backfill, drops our own domain (any
+   case, any subdomain; lookalike domains kept) and writes the SQL that is applied. It also
+   deletes own-domain rows left by an earlier unfiltered apply. Output is byte-identical for the
+   same input, and applying it again changes nothing. `--sqlite` applies it to a local file;
+   production is `wrangler d1 execute --remote` by a human.
+2. **Quo ingest is bounded per run** (`src/ingest/quo.ts`), with the same shape as Gmail: a
+   `{highWater, scan}` cursor, at most 2 listing pages and 20 conversations per run, a page cap
+   per conversation, and the shared fetch and query `Budget`. The cursor becomes the completed
+   scan's start time. The fake Quo API now pages.
+3. **Docs:** Workers Paid ($5/month) is required, in CLAUDE.md and README, from Cloudflare's docs.
+   HANDOFF notes that RUNLOG commit IDs for rounds 1–6 don't resolve after the rewrite, plus
+   this round's findings.
+
+### Failing first, then passing
+- **Apply known senders:** 7/7 failed first (no script); 7/7 after. 12/12 breaks caught.
+- **Quo budget:** the new file failed to load on the old code. With only `QUO_LIMITS` added,
+  5 of 7 failed. The 2 that passed were the constants check and the multi-run-activity test,
+  which old code passes only by reading everything in one run. After: 10/10.
+  - 15 breaks: 13 caught first time.
+  - The misses were no per-run conversation cap (the listing cap hid it at page size 10) and
+    uncounted fetches (the D1 limit bit first). A test was added for each and both are caught.
+  - My first break for the cursor rule was too weak. The sharper one (cursor = scan end time)
+    was missed while the scan fit inside the 5-minute overlap; the test now spans three runs
+    and it is caught.
+- **Existing Quo tests:** assertions on the old cursor format (a plain number of the newest
+  event) were updated to `highWater`. Same intent: held on failure, advances after success.
+- **Totals:** 203 tests, 203 pass, 0 fail. Check and build are clean, verified after staging.
+
+### Real runs
+- **Trash re-run (before touching the state):** incremental, 6 threads changed, 262 → 267
+  threads (customer 45 → 46, bulk 39 → 40, spam 178 → 181). **Trash in window: 0; newly
+  trashed: 0.** support@ Trash is empty. History shows 5 permanent deletions: 4 were ingested
+  spam from 14–15 August (Gmail's 30-day purge) and 1 was never ingested. See HANDOFF.
+- **Known senders:** 723 in, 8 filtered, 715 applied. Local database 724 → 716 rows, 0
+  own-domain. A second apply left it at 716.
+- **Queue check on local data:** `/api/queue`'s query returns 37 of 45 Needs-reply threads
+  (HANDOFF, Known wrong 0).
+
+### Still unproven
+- Trash ingest on real mail.
+- Anything on Cloudflare: D1, cron, Access, the UI against the real API.
+- Quo against the real API (paging, page-token lifetime).
+
+---
+
 ## Round 7 — privacy, incremental ingest, known senders, counts (2026-09-13, branch `claude/inh-round-7`, cut from `claude/inh-round-6`)
 
 Nothing was deployed, merged, pushed, or PR'd. Every change was done test-first. No database

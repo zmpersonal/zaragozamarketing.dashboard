@@ -209,17 +209,46 @@ Unverified against the real API:
   the heaviest run used 28 fetches and 87 D1 statements.
   - Worst case per mailbox per run: fetches ≤ 4 + 25 = 29; D1 ≤ 3 + 25 × (7 + replies in the
     thread). Plus 1 D1 query for the source list per invocation.
-  - Defaults cap the invocation at 900 subrequests and 900 D1 queries: inside Workers Paid
-    (10,000 / 1,000), not Free (50 / 50, 10 ms cron CPU). **Workers Paid is required.** On Free,
-    `INGEST_MAX_SUBREQUESTS` / `INGEST_MAX_D1_QUERIES` could be set to ~45 but the 10 ms CPU cap
-    would still likely fail.
-  - **Quo ingest is not budgeted yet.** It runs on its own trigger but has no per-run cap.
+  - Defaults cap the invocation at 900 subrequests and 900 D1 queries, inside Workers Paid.
+    **Workers Paid ($5/month) is required** (round 8, recorded in CLAUDE.md and README). Free
+    allows 50 external subrequests and 10 ms CPU per invocation, and enforces daily D1 row
+    limits since 1 September 2026.
+  - **Quo is budgeted (round 8):** worst case per source per run is 122 fetches (2 listing pages
+    + 20 conversations × 3 pages each of messages and calls) and 1 + 20 × (6 + waits ended) D1
+    statements, all inside the same 900 / 900 budget.
 - **Exemption parity (round 7).** `prove/backfill-known-senders.mjs` read all 2,192 sent
   messages on support@ (back to 2024-11-22) and produced 723 `known_sender` rows, in
-  `~/Code/secrets/inhouse-ops-known-senders.sql`. **Not applied to any database:** a human runs
-  `wrangler d1 execute inhouse-ops --file=<that file> --remote` after `schema.sql`.
+  `~/Code/secrets/inhouse-ops-known-senders.sql`.
+  - Round 8: `prove/apply-known-senders.mjs` filters out our own domain (8 of 723) and wrote
+    715 rows to `…known-senders.filtered.sql`. Applied to the local live-ingest database only
+    (724 → 716 rows, 0 own-domain; a second apply changed nothing). Production D1 is a human
+    step at deploy.
 - **No-reply separator edge:** names ending in "no" + separator + "reply" (`bruno_reply@`,
   `arno.reply.smith@`) now match `NOREPLY`. None appeared in the real stream.
+
+### Trash on real mail (round 8): not verified
+- The owner reported moving a junk message to Trash on support@. On re-running
+  `prove/ingest-live.mjs` against the saved state, support@'s Trash was **empty**: `in:trash`,
+  `labelIds=TRASH` and the TRASH label's own counts were all 0.
+- `history.list` since the round-7 baseline showed 6 messages added, 1 label added (a user
+  label, not TRASH) and **5 messages permanently deleted**. Four of those were threads ingested
+  in round 7, all `spam` from 14–15 August, which is Gmail's automatic 30-day spam purge. The
+  fifth was never ingested.
+- So either the message was moved in another mailbox, or it was deleted forever or Trash was
+  emptied before the re-run. Needs the owner to check, then re-run.
+
+### Deleted mail is never noticed by ingest (round 8 finding)
+Gmail ingest asks `history.list` for message-added and label changes only, not
+`messageDeleted`. A permanently deleted message (including Gmail's own 30-day spam purge) leaves
+its thread row exactly as it was: the 4 purged spam threads above are still `spam` / `waiting`
+in the local database. For spam that's harmless. A real customer thread deleted in Gmail would
+stay in Needs reply forever. Not changed; owner decision on what a deleted thread should do.
+
+### No agent table exists (round 8)
+There is no `agent` table. Anyone the Cloudflare Access policy lets in is an agent, and
+`OWNERS` (a Worker var) decides who is an owner. So the Access policy is the only user list:
+adding or removing a person is an Access change, and there's no list for an assignee picker or
+per-agent reporting. Enough to log in; an owner decision whether V1 needs more.
 
 ### Other
 - **D1 itself.** All SQL has run only on `node:sqlite`.
@@ -228,6 +257,14 @@ Unverified against the real API:
 ---
 
 ## Known wrong — correctness
+
+### 0. `/api/queue` drops Needs-reply threads once bulk and spam pile up (round 8, deploy blocker)
+The queue query returns every waiting or blocked thread of every tier, oldest first, `LIMIT 200`.
+On the local live database (support@, 30 days) it returned **37 of 45** Needs-reply threads.
+134 spam and 29 bulk threads sorted ahead of them, so the 8 newest customers were cut off.
+Spam and bulk threads are never closed, so this gets worse every week. It also breaks
+invariant 5: a thread the UI never receives is hidden. Not fixed in round 8 (the round asked
+for the deploy list first).
 
 ### 1. There's no admin report view
 `response` holds every measurement, but nothing reads it yet.
@@ -257,6 +294,12 @@ Round 7 rewrote this branch's history to remove a customer address and customer 
 `claude/inh-round-5` and `claude/inh-round-6` still contain them, and old objects stay in the
 local object store until `git gc --prune=now`. Deleting those branches is the owner's call.
 
+**Commit IDs quoted in RUNLOG for rounds 1–6 no longer resolve on this branch.** The rewrite
+gave every commit after round 1 a new ID, so hashes like `d8e0ef7` in older RUNLOG entries point
+at the pre-rewrite commits, which exist only on `claude/inh-round-5` / `-6` (and not at all once
+those are deleted and garbage-collected). Owner decision: **do not rewrite history again to fix
+them.** Find a round's commits by subject with `git log --oneline --grep`.
+
 ### 9. `prove/ingest-live.mjs` imports the D1 shim from `tests/helpers`
 Deliberate (it runs production SQL on node:sqlite), but it couples a prove script to test
 helpers.
@@ -272,8 +315,7 @@ helpers.
 
 ## Scale and cost — verify before go-live
 
-- **Subrequest limit.** Gmail is budgeted (see "Volume per cron run"). Quo makes 1+
-  conversation page plus 2 requests per active conversation with no cap yet.
+- **Subrequest limit.** Gmail and Quo are both budgeted (see "Volume per cron run").
 - **D1 reads and writes.** `syncThread` adds one SELECT per thread per sync, plus a
   response/failure write where relevant.
 
