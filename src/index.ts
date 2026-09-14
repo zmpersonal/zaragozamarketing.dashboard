@@ -1,15 +1,17 @@
 /**
  * InHouse / THI support console — Cloudflare Worker
  *
- * Serves the dashboard, the API and the Quo webhook. Ingest does not run here:
- * it runs hourly on GitHub Actions (scripts/ingest.mjs) and writes to the same
- * D1 database over the REST API. No dependency on any AI provider.
+ * Serves the dashboard, the API and the Quo webhook, which writes phone activity
+ * as it happens. Scheduled ingest (Gmail, and Quo polling as the backstop) runs
+ * hourly on GitHub Actions (scripts/ingest.mjs) against the same D1 database
+ * over the REST API. No dependency on any AI provider.
  */
 
 import { rescueThread, responseInsert } from './db/threads.ts';
 import type { Db } from './db/db.ts';
 import { listFailures } from './db/failures.ts';
 import { verifyQuoWebhook, webhookHeaders } from './lib/quo-signature.ts';
+import { ingestQuoWebhookEvent } from './ingest/quo.ts';
 
 export interface Env {
   DB: D1Database;
@@ -370,6 +372,28 @@ async function handleQuoWebhook(req: Request, env: Env): Promise<Response> {
   } catch {
     return json({ error: 'Body is not JSON' }, 400);
   }
-  console.log('quo webhook', event.type);
-  return json({ ok: true });
+
+  // webhook-id is stable across Quo's retries: a delivery already processed is
+  // acknowledged and not processed again. It is recorded only after processing
+  // succeeds, so a delivery that failed here is processed when Quo retries it.
+  const webhookId = req.headers.get('webhook-id') as string; // verified present above
+  const seen = await env.DB.prepare('SELECT 1 AS seen FROM webhook_delivery WHERE webhook_id = ?1').bind(webhookId).first();
+  if (seen) return json({ ok: true, result: 'duplicate' });
+
+  const at = Math.floor(Date.now() / 1000);
+  let result: 'synced' | 'ignored' | 'malformed';
+  try {
+    result = await ingestQuoWebhookEvent(env.DB, event, at);
+  } catch (err) {
+    console.error(`quo webhook ${webhookId} (${event.type}) failed; Quo will retry`, err);
+    return json({ error: 'Could not record the event' }, 500);
+  }
+  if (result === 'malformed') return json({ error: 'Malformed event' }, 400);
+
+  await env.DB.batch([
+    env.DB.prepare('INSERT OR IGNORE INTO webhook_delivery (webhook_id, event_type, received_at) VALUES (?1, ?2, ?3)')
+      .bind(webhookId, event.type ?? null, at),
+    env.DB.prepare('DELETE FROM webhook_delivery WHERE received_at < ?1').bind(at - 7 * 86400),
+  ]);
+  return json({ ok: true, result });
 }

@@ -43,7 +43,8 @@ export interface ThreadObservation {
   customer_handle: string | null;
   /** Overwrite customer fields on update (only when derived from the full thread). */
   refresh_customer: boolean;
-  preview: string;
+  /** Latest text; null keeps the stored preview (e.g. activity that is only a call). */
+  preview: string | null;
   /** When the conversation began. Written on insert only. */
   conversation_started_at: number;
   newest_inbound_at: number | null;
@@ -87,7 +88,7 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
     UPDATE thread SET
       customer_name    = CASE WHEN ?2 THEN ?3 ELSE customer_name END,
       customer_handle  = CASE WHEN ?2 THEN ?4 ELSE customer_handle END,
-      preview          = ?5,
+      preview          = COALESCE(?5, preview),
       is_automated     = COALESCE(?6, is_automated),
       last_inbound_at  = MAX(last_inbound_at, COALESCE(?7, last_inbound_at)),
       last_outbound_at = CASE

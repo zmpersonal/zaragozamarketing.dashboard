@@ -10,6 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../src/index.ts';
+import { makeD1 } from './helpers/d1.mjs';
 
 // Includes bytes >= 0x80: the key must be used as raw bytes.
 const KEY_BYTES = Uint8Array.from([0xff, 0x00, 0x80, 0x7f, 0x10, 0xc3, 0xa9, 0x42, 0x99, 0xfe, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
@@ -34,7 +35,10 @@ async function signed({ secret = SECRET, id = 'msg_2x9', ts = nowSec(), body = B
   };
 }
 
-const env = (over = {}) => ({ QUO_WEBHOOK_SECRET: SECRET, ...over });
+// A database, since a verified delivery is now recorded (round 10). This BODY has no
+// context, so it is acknowledged and ignored; tests/quo-webhook-ingest covers real events.
+const DB = makeD1();
+const env = (over = {}) => ({ QUO_WEBHOOK_SECRET: SECRET, DB, ...over });
 const post = (headers, body = BODY) =>
   new Request('https://console.example/hooks/quo', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
 const status = async (headers, { body = BODY, envOver } = {}) => (await worker.fetch(post(headers, body), env(envOver))).status;
@@ -115,4 +119,13 @@ test('webhook secret not configured, or not base64 -> 401 (fail closed)', async 
   const h = await signed();
   assert.equal(await status(h, { envOver: { QUO_WEBHOOK_SECRET: undefined } }), 401);
   assert.equal(await status(h, { envOver: { QUO_WEBHOOK_SECRET: 'whsec_!!!not base64!!!' } }), 401);
+});
+
+test('a rejected delivery writes nothing: no thread, no delivery record', async () => {
+  const before = DB.raw.prepare('SELECT COUNT(*) AS n FROM webhook_delivery').get().n;
+  assert.equal(await status(await signed({ secret: OTHER_SECRET, id: 'msg_rejected' })), 401);
+  assert.equal(await status(await signed({ ts: nowSec() - 600, id: 'msg_rejected' })), 401);
+  assert.equal(DB.raw.prepare('SELECT COUNT(*) AS n FROM webhook_delivery').get().n, before);
+  assert.equal(DB.raw.prepare("SELECT COUNT(*) AS n FROM webhook_delivery WHERE webhook_id = 'msg_rejected'").get().n, 0);
+  assert.equal(DB.raw.prepare('SELECT COUNT(*) AS n FROM thread').get().n, 0);
 });

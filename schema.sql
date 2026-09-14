@@ -151,6 +151,18 @@ CREATE TABLE IF NOT EXISTS ingest_failure (
 );
 
 -- ---------------------------------------------------------------
+-- Webhook deliveries already processed, keyed by the Standard Webhooks
+-- webhook-id header (stable across Quo's retries, which run for ~27.5 hours).
+-- A repeat delivery is acknowledged without being processed again. Rows
+-- older than 7 days are pruned on insert.
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS webhook_delivery (
+  webhook_id   TEXT PRIMARY KEY,
+  event_type   TEXT,
+  received_at  INTEGER NOT NULL
+);
+
+-- ---------------------------------------------------------------
 -- Sender rules: what the agent taught us by clicking Not customer
 -- or Spam. Applies going forward, and doubles as labelled training
 -- data if we ever want to revisit the rules with a model.

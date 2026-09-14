@@ -29,7 +29,7 @@
  * A Budget (lib/budget.ts) counts every fetch and D1 statement; a
  * conversation that doesn't fit what is left waits for the next run.
  */
-import type { IngestEnv } from '../db/db.ts';
+import type { Db, IngestEnv } from '../db/db.ts';
 import type { Observed } from '../lib/thread-state.ts';
 import { syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure, SKIP_AFTER_FAILURES } from '../db/failures.ts';
@@ -145,7 +145,8 @@ export function toTimeline(messages: QuoMessage[], calls: QuoCall[]): Observed[]
   const timeline: Observed[] = [];
   for (const m of messages) {
     if (m.direction === 'incoming') timeline.push({ at: secs(m.createdAt), inbound: true });
-    else if (m.status !== 'undelivered') timeline.push({ at: secs(m.createdAt), inbound: false });
+    // Undelivered and failed texts never reached the customer, so they are not contact.
+    else if (m.status !== 'undelivered' && m.status !== 'failed') timeline.push({ at: secs(m.createdAt), inbound: false });
   }
   for (const c of calls) {
     if (c.direction === 'incoming') {
@@ -266,14 +267,14 @@ export async function ingestQuo(env: IngestEnv, budget: Budget = Budget.from(env
         const c = scan.pending[0];
         const itemId = `quo:${c.id}`;
         try {
-          const { messages, timeline } = await readConversation(env, c, scan.since, { fetch: budget.fetch, maxPages: QUO_LIMITS.pagesPerConversation });
+          const { messages, calls, timeline } = await readConversation(env, c, scan.since, { fetch: budget.fetch, maxPages: QUO_LIMITS.pagesPerConversation });
           // Each outbound can end a wait and add a response row.
           const writes = CONVERSATION_QUERIES + timeline.filter((e) => !e.inbound).length + 1;
           if (writes > budget.maxQueries || writes > budget.maxSubrequests) {
             throw new Error(`needs ${writes} D1 queries, more than one run allows`);
           }
           if (!budget.canAfford(0, writes)) throw new DeferConversation();
-          if (timeline.length) await syncConversation(benv, src, c, messages, timeline, now);
+          await syncQuoActivity(benv, src, c, { messages, calls }, now);
           await clearFailure(db, src.id, itemId);
         } catch (err) {
           if (err instanceof DeferConversation) break; // stays first in line for the next run
@@ -312,6 +313,89 @@ export async function ingestQuo(env: IngestEnv, budget: Budget = Budget.from(env
   return summary;
 }
 
+/**
+ * The one write path for Quo activity, whichever way it arrived: polling
+ * (readConversation) or a webhook event (quoWebhookActivity). Both hand over
+ * the same message and call shapes, so the timeline, state rules and
+ * response measurements cannot drift between them. Returns false when there
+ * is nothing to record (e.g. only a failed outgoing text).
+ */
+export async function syncQuoActivity(
+  env: IngestEnv, src: { id: string; brand_id: string }, c: QuoConversation,
+  activity: { messages: QuoMessage[]; calls: QuoCall[] }, now: number,
+): Promise<boolean> {
+  const timeline = toTimeline(activity.messages, activity.calls);
+  if (!timeline.length) return false;
+  await syncConversation(env, src, c, activity.messages, timeline, now);
+  return true;
+}
+
+// --- webhook events (API 2026-03-30) -------------------------------------------
+// www.quo.com/docs/2026-03-30/webhooks-event-payloads, read round 10. Every event
+// is {id, type, createdAt, data: {resource, context}}; context carries
+// phoneNumberId and conversationId (both may be null).
+
+export type WebhookActivity =
+  | { kind: 'activity'; phoneNumberId: string; conversation: QuoConversation; messages: QuoMessage[]; calls: QuoCall[] }
+  | { kind: 'ignored'; reason: string }
+  | { kind: 'malformed'; reason: string };
+
+const MESSAGE_EVENTS = new Set(['message.received', 'message.delivered', 'message.undelivered', 'message.failed']);
+const CALL_EVENTS = new Set(['call.completed', 'call.missed']);
+const isTime = (v: unknown): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v));
+
+/** Turn a verified webhook event into the message/call shapes polling produces. Pure. */
+export function quoWebhookActivity(event: any): WebhookActivity {
+  const type = event?.type;
+  if (!MESSAGE_EVENTS.has(type) && !CALL_EVENTS.has(type)) return { kind: 'ignored', reason: `event type ${type} is not ingested` };
+  const resource = event?.data?.resource;
+  const context = event?.data?.context;
+  if (!resource || !context) return { kind: 'malformed', reason: `${type} without data.resource or data.context` };
+  if (!context.phoneNumberId) return { kind: 'ignored', reason: `${type} has no phoneNumberId` };
+  if (!context.conversationId) return { kind: 'ignored', reason: `${type} has no conversationId` };
+  if (!isTime(resource.createdAt)) return { kind: 'malformed', reason: `${type} resource.createdAt is missing or not a date` };
+
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  let participants: string[];
+  const messages: QuoMessage[] = [];
+  const calls: QuoCall[] = [];
+  if (MESSAGE_EVENTS.has(type)) {
+    const incoming = type === 'message.received';
+    participants = incoming ? strings([context.senderIdentifier]) : strings(context.recipientIdentifiers);
+    messages.push({
+      direction: incoming ? 'incoming' : 'outgoing',
+      status: typeof resource.status === 'string' ? resource.status : type.slice('message.'.length),
+      createdAt: resource.createdAt,
+      text: typeof resource.text === 'string' ? resource.text : undefined,
+    });
+  } else {
+    participants = strings(context.participants?.external);
+    const direction = type === 'call.missed' ? 'incoming' : resource.direction;
+    if (direction !== 'incoming' && direction !== 'outgoing') return { kind: 'malformed', reason: `${type} without a direction` };
+    if (resource.answeredAt != null && !isTime(resource.answeredAt)) return { kind: 'malformed', reason: `${type} resource.answeredAt is not a date` };
+    calls.push({ direction, createdAt: resource.createdAt, answeredAt: type === 'call.missed' ? null : resource.answeredAt ?? null });
+  }
+  return {
+    kind: 'activity',
+    phoneNumberId: context.phoneNumberId,
+    // A webhook-first thread starts at its first event; polling's view of the
+    // conversation's own createdAt never overwrites it (conversation_started_at is insert-only).
+    conversation: { id: context.conversationId, phoneNumberId: context.phoneNumberId, participants, name: null, createdAt: resource.createdAt },
+    messages, calls,
+  };
+}
+
+/** Write a verified webhook event. 'ignored' covers events we can't place (unknown number, no conversation, other types). */
+export async function ingestQuoWebhookEvent(db: Db, event: unknown, now: number): Promise<'synced' | 'ignored' | 'malformed'> {
+  const a = quoWebhookActivity(event);
+  if (a.kind === 'malformed') { console.error(`quo webhook: malformed event: ${a.reason}`); return 'malformed'; }
+  if (a.kind === 'ignored') { console.log(`quo webhook ignored: ${a.reason}`); return 'ignored'; }
+  const src = await db.prepare(`SELECT id, brand_id FROM source WHERE provider = 'quo' AND address = ?1`)
+    .bind(a.phoneNumberId).first<{ id: string; brand_id: string }>();
+  if (!src) { console.log(`quo webhook ignored: no source for phone number ${a.phoneNumberId}`); return 'ignored'; }
+  return (await syncQuoActivity({ DB: db }, src, a.conversation, a, now)) ? 'synced' : 'ignored';
+}
+
 /** Write one conversation's observed timeline to its thread. */
 async function syncConversation(
   env: IngestEnv, src: { id: string; brand_id: string }, c: QuoConversation,
@@ -332,7 +416,7 @@ async function syncConversation(
     customer_name: c.name ?? null,
     customer_handle: c.participants[0] ?? null,
     refresh_customer: false,
-    preview: (latest?.text ?? '').slice(0, 200),
+    preview: latest?.text ? latest.text.slice(0, 200) : null,
     conversation_started_at: secs(c.createdAt),
     newest_inbound_at: newest(true),
     newest_outbound_at: newest(false),
