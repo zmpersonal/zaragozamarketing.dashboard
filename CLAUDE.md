@@ -8,24 +8,32 @@ One internal console. The repo is named for where it's hosted: Zaragoza Marketin
 subdomain. InHouse Wellness (INH), THI and ZM are meant to become tabs in this same console,
 not separate projects. **V1 content is InHouse Wellness customer service only.**
 
-It is one Cloudflare Worker (`src/index.ts`) with a D1 database (`schema.sql`) and a static UI
-(`public/index.html`). The Worker serves the UI and `/api/*`, and runs Gmail and Quo ingest
-on two 5-minute cron triggers (Gmail at :00/:05…, Quo two minutes later), so each gets its own
-subrequest budget. No AI provider sits in the critical path.
+It runs in two places (round 9), both on free tiers:
+- **Cloudflare Worker, Workers Free** (`src/index.ts`): serves the static UI (`public/index.html`),
+  `/api/*` and the Quo webhook `/hooks/quo`, reading and writing D1 (`schema.sql`) through its
+  binding. It has no cron triggers and runs no ingest.
+- **GitHub Actions, hourly** (`.github/workflows/ingest.yml` → `scripts/ingest.mjs`): runs Gmail
+  and Quo ingest as plain Node, writing to the same D1 database through Cloudflare's D1 REST API
+  (`src/db/d1-http.ts`). The ingest code, triage rules and clock are the same code either way;
+  only where the statements go differs (`src/db/db.ts`).
 
-**Hosting cost: this needs the Cloudflare Workers Paid plan, $5/month minimum per account.**
-The free tier will not carry it. Hosting was earlier described to Julian as effectively free;
-that was wrong, and it is recorded here so it isn't discovered at deploy. Why (Cloudflare docs,
-read round 8):
-- Free allows 50 external subrequests per invocation. Quo ingest alone can need 122 in one run
-  (see invariant 7), and Gmail up to 29.
-- Free allows 10 ms of CPU per invocation. Signing the Gmail service-account JWT, parsing
-  threads and running the SQLite work of a sync run won't reliably fit.
-- Since 1 September 2026, D1 queries on Free fail once the account passes its daily row read or
-  row write limit.
-Paid allows 10,000 subrequests and 5 minutes of CPU per invocation (15 minutes for a cron
-trigger). The ingest budget defaults (900 / 900) are sized for Paid, and tests assert they stay
-under its caps. Don't size anything for Free.
+No AI provider sits in the critical path.
+
+**Why the split, and what it costs.** Workers Free caps an invocation at 50 external fetches and
+10 ms of CPU, which ingest can't fit. Round 8 concluded Workers Paid ($5/month) was required;
+Julian is staying on the free tier instead, so ingest moved to Actions. **Workers Paid is no
+longer required.** The trade, recorded so nobody discovers it later:
+- **Email is checked roughly hourly**, not every five minutes. A customer email can sit up to
+  about an hour before it appears in the queue.
+- **GitHub can delay scheduled runs by 15–60 minutes under load**, so "hourly" can stretch to
+  nearly two hours now and then.
+- **Phone:** the Quo webhook stays on the Worker so phone *can* be real-time, but **the webhook
+  only verifies and logs today; it does not write threads.** Until webhook ingest is built,
+  phone is hourly too, via the same Actions run.
+- **Limits that now bind:** Cloudflare's API allows 1,200 requests per 5 minutes per token (every
+  call blocked for 5 minutes past that); each run stays under 1,000 D1 statements. GitHub Free
+  allows 2,000 Actions minutes a month for a private repo; the 2-minute job timeout caps the
+  worst case at 1,460. D1 Free allows 5 million rows read and 100,000 written a day.
 
 ## Commands
 
@@ -36,6 +44,7 @@ under its caps. Don't size anything for Free.
 | `npm run build` | `wrangler deploy --dry-run --outdir dist`. Bundles locally and never contacts Cloudflare. |
 | `npm run prove:oauth` | Local Google OAuth flow that prints a gmail.readonly refresh token for one mailbox. |
 | `npm run deploy`, `npm run db:init` | **Human only.** Both touch production. Never run them. |
+| `node scripts/ingest.mjs` | **Human only (or Actions).** One ingest run against production D1. Needs the `CLOUDFLARE_*` variables. |
 
 `check`, `test` and `build` must all be clean before a round is reported done.
 
@@ -51,12 +60,19 @@ the round asks for one. Don't run `wrangler deploy` (except the `--dry-run` in `
 
 ### 2. Never commit secrets
 - Local secrets go in `.dev.vars`, which is gitignored along with `.env`, `.wrangler/` and `node_modules/`.
-- Production secrets are set with `wrangler secret put NAME`. `wrangler.toml` lists secret
-  *names* only, never values.
-- The Worker secrets are `GOOGLE_SERVICE_ACCOUNT_JSON`, `QUO_API_KEY` and `QUO_WEBHOOK_SECRET`.
-  - `GOOGLE_SERVICE_ACCOUNT_JSON` is the service-account key's JSON (domain-wide delegation,
-    `gmail.readonly`).
+- Production secrets are set by a human, never in a file. `wrangler.toml` lists secret *names*
+  only, never values (account and database IDs are not secrets).
+  - **Worker secret** (`wrangler secret put`): `QUO_WEBHOOK_SECRET`.
+  - **GitHub Actions secrets** (repo settings): `GOOGLE_SERVICE_ACCOUNT_JSON` (the service-account
+    key's JSON; domain-wide delegation, `gmail.readonly`), `QUO_API_KEY`, `CLOUDFLARE_API_TOKEN`
+    (scoped to D1 edit only), `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_D1_DATABASE_ID`.
   - There are no refresh tokens.
+- **The ingest workflow never echoes a secret, including on failure.** Secrets reach only the
+  ingest step, as environment variables. `scripts/_ingest-run.mjs` passes everything it prints
+  (ingest's own logs and error stacks included) through a redactor holding every secret value
+  and each line of the key. The D1 client never puts the token in an error. No `set -x`, no
+  `continue-on-error`, `persist-credentials: false`. Tests: `tests/ingest-workflow.test.mjs`,
+  `tests/ingest-runner.test.mjs`, `tests/d1-http.test.mjs`.
 - **The Gmail service-account key never enters the repo.**
   - Locally it lives outside the repo, and scripts read it only through the path in
     `GOOGLE_SERVICE_ACCOUNT_FILE`.
@@ -170,9 +186,10 @@ tier is shown, and every non-customer verdict carries its reasons to the UI.
   - Stored `historyId`: `history.list` (message added, label added, label removed), fetching
     only changed threads.
   - Expired (404) or invalid (400) `historyId`: warn, bounded window listing, re-seed.
-  - A `Budget` (`src/lib/budget.ts`) counts every fetch and D1 statement per invocation and stops
-    before the cap; the rest waits for the next run. Defaults stay under Workers Paid limits,
-    asserted by a test.
+  - A `Budget` (`src/lib/budget.ts`) counts every fetch and D1 statement per run, and has a
+    wall-clock deadline. Ingest stops before the cap or deadline; the rest waits for the next
+    run. Caps (round 9, sized for an hourly runner): 150 threads, 600 D1 statements; the run's
+    deadline is what usually binds. Tests: `tests/run-limits.test.mjs`.
   - Drafts and chats never count as messages, so a saved draft reply isn't a reply.
   - Tests: `tests/gmail-incremental.test.mjs`, `tests/gmail-population.test.mjs`.
 - **The UI has three sections** (`public/queue-sections.mjs`): Needs reply, Probably not
@@ -225,7 +242,7 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
 - `answered` and `waiting` are **not** protected. Ingest recomputes them from the timeline.
 - **Enforced today:** `resolveState()` applies these rules. `syncThread()`'s UPDATE is also
   conditional on the status, `awaiting_since`, `last_inbound_at` and `last_outbound_at` it read.
-  If an agent changes the thread mid-sync, the write is skipped and the next cron run resolves
+  If an agent changes the thread mid-sync, the write is skipped and the next ingest run resolves
   again.
   - Tests: `tests/awaiting-since.test.mjs` (guards) and `tests/sync-thread.test.mjs` (the race).
 - Any new ingest source must go through `syncThread()`.
@@ -254,10 +271,12 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
     waits. One that could never fit a run, or has more than `pagesPerConversation` pages of
     messages or calls, is recorded in `ingest_failure` like any failure, so it can't block the
     queue.
-  - Worst case per source per run: 2 + 20 × 6 = 122 fetches; D1 1 + 20 × (6 + waits ended).
+  - Caps (round 9): 80 conversations, 5 listing pages, 10 pages per conversation, 400 D1
+    statements per run; the run's deadline is what usually binds.
   - Tests: `tests/quo-budget.test.mjs`, `tests/quo-ingest.test.mjs`.
   - The cursor advances unless a conversation failed and is still being retried.
-  - The webhook is the fast path; polling is the backstop.
+  - The webhook is meant to be the fast path, with polling as the backstop. **It does not write
+    threads yet**, so today polling (hourly, on Actions) is the only path.
   - `prove/quo.mjs` uses the same exported helpers.
 
 ### 8. Agents are identified individually
@@ -290,14 +309,16 @@ over the raw body before trusting it (`src/lib/quo-signature.ts`).
 ## Layout
 
 ```
-src/index.ts              Worker: auth (Access JWT), /api routes, /hooks/quo, cron → ingest
+src/index.ts              Worker: auth (Access JWT), /api routes, /hooks/quo. No ingest, no cron.
 src/ingest/gmail.ts       Gmail threads (service-account auth) → timeline → syncThread (customer = first inbound sender)
 src/ingest/quo.ts         Quo v1 messages + calls since source.sync_cursor → syncThread
 src/ingest/chat.ts        provider-agnostic chat → syncThread (not routed yet)
+src/db/db.ts              Db: the database surface ingest uses (binding or REST client)
+src/db/d1-http.ts         D1 over Cloudflare's REST API: retries 429, retries 5xx for reads only
 src/db/threads.ts         syncThread (conditional write), rescueThread, responseInsert
 src/db/failures.ts        ingest_failure: recordFailure / clearFailure / listFailures (skip after 3)
 src/lib/google-auth.ts    service-account JWT (domain-wide delegation) → Gmail access token
-src/lib/budget.ts         per-invocation subrequest / D1 query budget
+src/lib/budget.ts         per-run fetch / D1 statement caps and wall-clock deadline
 src/lib/thread-state.ts   status / awaiting_since / reopen rules, responseMinutes (pure)
 src/lib/triage.ts         demotion rules (pure)
 src/lib/clock.ts          business-minutes clock (pure)
@@ -308,6 +329,8 @@ prove/*.mjs               run-by-hand source proofs; need real credentials (Gmai
                           Never in cron. backfill-known-senders.mjs (one-off), apply-known-senders.mjs
                           (setup, filters our own domain) and ingest-live.mjs write customer data to
                           files outside the repo only.
+scripts/ingest.mjs        hourly ingest entry point (GitHub Actions); logic in scripts/_ingest-run.mjs
+.github/workflows/ingest.yml  hourly schedule + manual run, keepalive, 2-minute timeout
 seeds/*.example.sql       shape of setup seeds; real seeds live outside the repo
 tests/*.test.mjs          node:test suites; tests/helpers has the D1 shim, fake Gmail, fake
                           Quo v1 API, and an Access JWT minter

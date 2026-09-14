@@ -9,7 +9,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const SCANNED = ['src', 'tests', 'public', 'prove'];
+const SCANNED = ['src', 'tests', 'public', 'prove', 'scripts', '.github'];
 
 // Built from parts so this file never contains an address itself.
 const CONSUMER = ['icloud', 'me', 'mac', 'gmail', 'googlemail', 'yahoo', 'ymail', 'outlook', 'hotmail', 'live', 'msn', 'aol'];

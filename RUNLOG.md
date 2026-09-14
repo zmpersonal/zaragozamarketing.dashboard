@@ -5,6 +5,76 @@ still unproven.
 
 ---
 
+## Round 9 — the queue bug, and ingest moves to GitHub Actions (2026-09-14, branch `claude/inh-round-9`, cut from `claude/inh-round-8`)
+
+Nothing was deployed, merged, pushed, or PR'd. Mid-round the owner changed the round: the
+security fixes, deleted-mail handling and UI wiring moved to round 10, and ingest moved off
+Workers. Deleted-mail work already started (tests only) is in `git stash`, not on the branch.
+
+### What changed
+1. **Queue separation** (`edf947c`): each tier of `/api/queue` is its own query with its own
+   limit (500 / 200 / 200). The response carries `tiers: {shown, total}`, and a cut section says
+   "N of M" in the UI. Unknown tiers are served with Needs reply.
+2. **Database abstraction** (`c22d7ae`): `src/db/db.ts` (`Db`, which the binding satisfies) and
+   `src/db/d1-http.ts` (the same surface over the D1 REST API).
+   - The client retries 429 (Retry-After, capped at 30 s) and retries 5xx and network errors for
+     read-only statements only. It never retries 4xx, and the token never appears in an error.
+   - `selfCheck()` confirms parameters round-trip with their types.
+   - Ingest and the thread writes take `Db`; queries, triage, clock and state rules are unchanged.
+   - Ingest now returns a summary (failed sources, failed items, processed).
+3. **Caps for a runner** (same commit): Gmail 150 threads / 600 D1 statements, Quo 80
+   conversations / 400 statements, larger pages. `Budget` takes a wall-clock deadline. The
+   Worker lost its scheduled handler and cron triggers; `wrangler.toml` has the account and D1 IDs.
+4. **Runner and workflow** (`5d05b58`):
+   - `scripts/ingest.mjs` checks configuration, then the self-check, then runs Gmail (to 45 s)
+     and Quo (to 80 s), and prints a summary per source.
+   - A source it can't read gives `::error::` and exit 1; failed items give `::warning::`.
+   - Every printed line is redacted.
+   - `.github/workflows/ingest.yml`: hourly at :17 plus manual runs, one job, 2-minute timeout,
+     secrets only as step environment, no overlapping runs, and a keepalive empty commit after
+     45 quiet days.
+5. **Docs:** CLAUDE.md, README and HANDOFF describe the split runtime and remove the Workers
+   Paid requirement. The trade is recorded: hourly email, 15–60 minute schedule delays, and
+   phone not real-time until the webhook writes threads.
+
+### Failing first, then passing
+- **Queue separation:** 4/4 failed on the old single query (with only the limits constant
+  added), including "customer thread c0 missing from the queue". The UI "N of M" test: 1 failed,
+  then 9/9. After: 4/4. 7/7 breaks caught, including a single query with a 100,000 limit
+  ("headroom, not separation").
+- **D1 REST client:** the module was missing, so the file failed to load. After: 11/11.
+  - 18 breaks, 15 caught first time.
+  - Two misses got new tests: `first()` returning the last row, and a statement-level
+    `success: false`. Both are now caught.
+  - One is equivalent: with string params, `?1 = 7` already fails the self-check, so dropping
+    the numeric-type check changes nothing.
+- **Binding vs HTTP parity:** the same Gmail and Quo scenarios leave identical databases. Its
+  breaks (changes always 0, first row wrong) are caught.
+- **Run limits:** 5/5 failed (no deadline, Workers-sized caps). After: 5/5. The deadline and cap
+  breaks are caught.
+- **Worker has no cron:** failed while `scheduled` existed; passes after removal.
+- **Runner:** failed to load (no module); 8/8 after. The workflow tests were written with the
+  workflow, so their proof is the breaks.
+  - 20 breaks, 17 caught first time.
+  - Two misses got new tests (Gmail throwing mid-run, ingest logs bypassing the redactor); the
+    third was a break that didn't move the keepalive step, now replaced by one that does.
+  - All 3 are now caught.
+- **Existing tests:** two fixtures assumed the old small caps (page smaller than a run). They
+  were fixed to model the real page sizes. The cap assertions tied to Workers Paid now assert
+  finiteness, with the real justification in `tests/run-limits.test.mjs`.
+- **Totals:** 240 tests, 240 pass, 0 fail. Check and build are clean, verified after staging.
+
+### Actions minutes
+730 runs a month. Expected ~740 billed minutes (1 per normal run, plus a few 2-minute backfill
+runs): 37% of the free 2,000. Worst case with every run hitting the 2-minute timeout: 1,460 (73%).
+
+### Still unproven
+- The workflow on GitHub (it runs only once merged to the default branch).
+- The D1 REST API itself: parameter types (self-check on every run), batch atomicity, latency.
+- Workers Free CPU for API requests.
+
+---
+
 ## Round 8 — deploy blockers: known senders, Quo budget, cost (2026-09-14, branch `claude/inh-round-8`, cut from `claude/inh-round-7`)
 
 Nothing was deployed, merged, pushed, or PR'd. No history was rewritten.

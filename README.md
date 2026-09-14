@@ -12,12 +12,20 @@ The rules the code must never break are in `CLAUDE.md`. Open questions and known
 
 The stack was chosen to be cheap, secure, and still standing if every subscription lapses:
 
-- **Cloudflare Workers + D1 + static assets.** One Worker and one SQLite database. The Worker
-  serves the UI, the `/api` routes and `/hooks/quo`, and runs ingest on two 5-minute crons.
-- **Cost: the Workers Paid plan, $5/month minimum.** The free tier will not carry the ingest.
-  It allows 50 outbound requests and 10 ms of CPU per run, and Quo alone can need 122 requests
-  in one run. D1 on Free also fails once the daily row limits are passed. This was earlier
-  described as effectively free; that was wrong. See CLAUDE.md, "Hosting cost".
+- **Cloudflare Workers (free) + D1 + static assets.** One Worker and one SQLite database. The
+  Worker serves the UI, the `/api` routes and `/hooks/quo`.
+- **GitHub Actions (free) runs ingest hourly.** Gmail and Quo ingest run as plain Node and write
+  to D1 through Cloudflare's D1 REST API. Workers Free caps a run at 50 outbound requests and
+  10 ms of CPU, which ingest can't fit; an Actions runner has neither limit.
+- **Cost: $0 on the free tiers.** Round 8 said Workers Paid ($5/month) was required; with ingest
+  on Actions it isn't. The trade:
+  - Email is checked roughly hourly, not every five minutes.
+  - GitHub can delay scheduled runs by 15–60 minutes when it's busy.
+  - Phone is meant to stay real-time through the Quo webhook, but the webhook doesn't write
+    threads yet, so for now phone is hourly too.
+  - Free-tier ceilings: 2,000 Actions minutes a month (private repo; the workflow is capped at
+    1,460 even in the worst case), 1,200 Cloudflare API requests per 5 minutes, and D1's
+    5 million rows read and 100,000 written per day.
 - **Cloudflare Access for login.** There's no password table. Each person signs in as
   themselves, and the Worker verifies the Access JWT again (signature, expiry, audience,
   email) before trusting it.
@@ -73,25 +81,28 @@ produces a second measurement.
   - Authenticates with one Google service account using domain-wide delegation. It
     impersonates each mailbox, with scope `gmail.readonly` only (`src/lib/google-auth.ts`).
     There are no refresh tokens.
-  - The Worker reads the key JSON from the `GOOGLE_SERVICE_ACCOUNT_JSON` secret; Workers have no
-    filesystem.
+  - The hourly Actions run reads the key JSON from the `GOOGLE_SERVICE_ACCOUNT_JSON` Actions
+    secret.
   - Reads everything received in the last 30 days, not just the inbox: archived, filtered,
     spam and trash included, excluding only sent, drafts and chats.
     `in:anywhere newer_than:30d -in:sent -in:drafts -in:chats`, with `includeSpamTrash=true`.
-  - Incremental: the first run seeds Gmail's `historyId` and backfills the window a page at a
-    time (25 threads per run). Later runs read `history.list` and fetch only threads that
-    changed. If Gmail no longer has that history, it re-lists the window and re-seeds.
-  - Every run stays inside a subrequest budget (fetches + D1 queries) and leaves the rest for
-    the next run. The defaults need **Workers Paid**; see HANDOFF, "Volume per cron run".
+  - Incremental: the first run seeds Gmail's `historyId` and backfills the window (up to 150
+    threads per run). Later runs read `history.list` and fetch only threads that changed. If
+    Gmail no longer has that history, it re-lists the window and re-seeds.
+  - Every run stays inside caps (fetches, D1 statements) and a time limit, and leaves the rest
+    for the next run.
   - Classifies each thread as customer, bulk or spam (see "The filter").
   - The customer is the sender of the first inbound message. Our replies are identified by
     Gmail's `SENT` label.
   - One bad thread is logged, recorded in `ingest_failure`, and skipped, and the rest sync.
-- **Cron:** Gmail runs on `*/5 * * * *`, Quo on `2-59/5 * * * *`, so each has its own budget.
+- **Where and when:** `.github/workflows/ingest.yml` runs `scripts/ingest.mjs` every hour at :17,
+  and can be run by hand from the Actions tab. Gmail gets the first 45 seconds of a run, Quo runs
+  until 80 seconds, and the job times out at 2 minutes. A run that can't read a source fails red;
+  items that fail are warnings and are listed on the board.
 - **Quo** (`src/ingest/quo.ts`, Quo v1 API):
-  - Bounded like Gmail: each run lists at most 2 pages of conversations and reads at most 20,
-    inside the same fetch and query budget. The first scan reads 30 days back over as many runs
-    as it takes.
+  - Bounded like Gmail: each run lists up to 5 pages of conversations and reads up to 80, inside
+    the same caps and time limit. The first scan reads 30 days back over as many runs as it
+    takes.
   - Reads every text and call created since a cursor stored per source, so an inbound that was
     answered before the next poll is still seen.
   - An answered call counts as contact; a missed call is waiting.
@@ -103,7 +114,8 @@ produces a second measurement.
     `webhook-timestamp` and `webhook-signature`, keyed by a `whsec_…` secret. The replay window
     is 5 minutes.
   - Anything else gets a 401, including Quo's legacy `openphone-signature`.
-  - It verifies and logs events, but doesn't ingest them yet. Polling is the backstop.
+  - It verifies and logs events, but doesn't ingest them yet. **Until it does, phone updates
+    hourly with the Actions run, not in real time.**
 
 ## Setup
 
@@ -111,18 +123,22 @@ produces a second measurement.
 npm install
 npm run check && npm test && npm run build   # typecheck, tests, local dry-run bundle
 
-# The account must be on Workers Paid ($5/month) first. See "Why this stack".
 npx wrangler login
-npx wrangler d1 create inhouse-ops          # paste the id into wrangler.toml
+# The database exists (id 4f562bdf-…, already in wrangler.toml). Load the schema:
 npx wrangler d1 execute inhouse-ops --file=./schema.sql --remote
 
-npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_JSON < /path/outside/the/repo/key.json
-npx wrangler secret put QUO_API_KEY
+# The Worker has one secret:
 npx wrangler secret put QUO_WEBHOOK_SECRET      # whsec_... from POST https://api.quo.com/webhooks
                                                  # with header Quo-Api-Version: 2026-03-30
-
 npx wrangler deploy
 ```
+
+Ingest credentials go in **GitHub → Settings → Secrets and variables → Actions**, never in the
+Worker: `GOOGLE_SERVICE_ACCOUNT_JSON` (paste the key file's contents), `QUO_API_KEY`,
+`CLOUDFLARE_API_TOKEN` (a token scoped to D1 edit only), `CLOUDFLARE_ACCOUNT_ID`,
+`CLOUDFLARE_D1_DATABASE_ID`. Scheduled workflows only run from the default branch, so the
+workflow starts once this branch is merged to `main`. Run it once by hand from the Actions tab
+to check it goes green.
 
 **Deploying, running `d1 … --remote`, and setting secrets are human steps.** See CLAUDE.md
 invariant 1.
@@ -198,7 +214,7 @@ node prove/ingest-live.mjs support@inhousewellness.com --state ~/Code/secrets/in
 
 - `prove/ingest-live.mjs` runs the real ingest into a local SQLite file outside the repo until
   caught up, then prints counts. Run it again and it's incremental: it shows what the next
-  cron run picks up, and names threads newly moved to Trash.
+  ingest run picks up, and names threads newly moved to Trash.
 
 - `prove/quo.mjs` uses the same v1 calls and waiting/answered rules as ingest.
 - `prove/triage.mjs` runs the filter over 30 days of real mail and prints every message with

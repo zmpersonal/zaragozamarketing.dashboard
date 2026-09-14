@@ -209,13 +209,9 @@ Unverified against the real API:
   the heaviest run used 28 fetches and 87 D1 statements.
   - Worst case per mailbox per run: fetches ≤ 4 + 25 = 29; D1 ≤ 3 + 25 × (7 + replies in the
     thread). Plus 1 D1 query for the source list per invocation.
-  - Defaults cap the invocation at 900 subrequests and 900 D1 queries, inside Workers Paid.
-    **Workers Paid ($5/month) is required** (round 8, recorded in CLAUDE.md and README). Free
-    allows 50 external subrequests and 10 ms CPU per invocation, and enforces daily D1 row
-    limits since 1 September 2026.
-  - **Quo is budgeted (round 8):** worst case per source per run is 122 fetches (2 listing pages
-    + 20 conversations × 3 pages each of messages and calls) and 1 + 20 × (6 + waits ended) D1
-    statements, all inside the same 900 / 900 budget.
+  - **Superseded in round 9:** ingest no longer runs on the Worker, so the Workers subrequest
+    ceiling and the Workers Paid requirement (round 8) no longer apply. See "Ingest on GitHub
+    Actions (round 9)" below for the caps and the minutes math.
 - **Exemption parity (round 7).** `prove/backfill-known-senders.mjs` read all 2,192 sent
   messages on support@ (back to 2024-11-22) and produced 723 `known_sender` rows, in
   `~/Code/secrets/inhouse-ops-known-senders.sql`.
@@ -258,13 +254,15 @@ per-agent reporting. Enough to log in; an owner decision whether V1 needs more.
 
 ## Known wrong — correctness
 
-### 0. `/api/queue` drops Needs-reply threads once bulk and spam pile up (round 8, deploy blocker)
+### 0. FIXED round 9: `/api/queue` dropped Needs-reply threads once bulk and spam piled up
 The queue query returns every waiting or blocked thread of every tier, oldest first, `LIMIT 200`.
 On the local live database (support@, 30 days) it returned **37 of 45** Needs-reply threads.
 134 spam and 29 bulk threads sorted ahead of them, so the 8 newest customers were cut off.
 Spam and bulk threads are never closed, so this gets worse every week. It also breaks
-invariant 5: a thread the UI never receives is hidden. Not fixed in round 8 (the round asked
-for the deploy list first).
+invariant 5: a thread the UI never receives is hidden. **Round 9:** each tier is its own query
+with its own limit (customer 500, bulk 200, spam 200), and the response and UI report "N of M" when
+a tier is cut. `tests/queue-tiers.test.mjs` checks that no statement serving `/api/queue` returns
+rows from more than one tier, so raising a limit can't make it pass.
 
 ### 1. There's no admin report view
 `response` holds every measurement, but nothing reads it yet.
@@ -313,9 +311,66 @@ helpers.
    `CF_Authorization` decides whether a cross-site POST gets through.
 3. **`GET /api/threads/:id` doesn't URL-decode the id.**
 
+## Ingest on GitHub Actions (round 9)
+
+**What moved.** Ingest runs hourly on GitHub Actions and writes to D1 over the REST API. The
+Worker (Workers Free) keeps the UI, the API and the Quo webhook. Owner decision: Julian stays on
+the free tier.
+
+**The trade, recorded:**
+- Email reaches the queue roughly hourly instead of within five minutes.
+- GitHub can delay scheduled runs 15–60 minutes under load.
+- **Phone is not real-time yet.** The Quo webhook stays on the Worker for that purpose, but it
+  only verifies and logs; it doesn't write threads. Until webhook ingest is built (not in scope
+  for round 9 or 10 so far), phone is hourly.
+
+**Caps and why (round 9):**
+- Gmail: 150 threads, 500-message backfill pages, 5 history pages, 600 D1 statements per run.
+- Quo: 80 conversations, 5 listing pages, 10 pages per conversation, 400 D1 statements per run.
+- 600 + 400 = 1,000 statements, under Cloudflare's API limit of 1,200 requests per 5 minutes per
+  token. Past that limit *every* call is blocked for 5 minutes, including a human's wrangler.
+- Each run also has a wall-clock deadline: Gmail starts no new work after 45 s, Quo after 80 s.
+  In practice the deadline binds before the counts. The counts stop a bug running away.
+- Expected throughput per run is an estimate, not measured: roughly 1 s per Gmail thread (one
+  Gmail call plus ~5 D1 REST calls at an assumed 100–200 ms each) and 1.5 s per Quo
+  conversation. That's ~45 threads and ~25 conversations per run, so a 260-thread email backlog
+  clears in about 6 hourly runs. The first real runs' summary lines (`d1 requests`, `elapsed`)
+  will give the real figures.
+
+**Actions minutes (GitHub Free: 2,000/month for a private repo; jobs bill rounded up to the minute):**
+- 24 × 365 / 12 ≈ 730 runs a month.
+- **Expected:** a steady-state run (a few changed threads, runner setup ~15 s) takes well under a
+  minute and bills 1 minute: ~730 minutes a month. Backfill runs bill 2 minutes each for the first
+  several hours: +~10 minutes once. **~740 minutes, 37% of the allowance.**
+- **Worst case, bounded:** the job timeout is 2 minutes, so even if every run hit it the month
+  would bill 1,460 minutes (73%). One job only; a second job would add a billed minute per run.
+
+**Keepalive.** GitHub disables scheduled workflows after 60 days without a commit, silently (it's
+documented for public repos, and reported for private ones). The workflow's first step pushes an
+empty commit to the default branch when the last commit is 45+ days old, using the workflow's own
+token (`contents: write`, the only permission granted). **This means the workflow itself commits
+to `main` roughly every 45 days on a quiet repo.** Owner-requested; noted because it's the only
+automated write to the repository.
+
+**Unverified until the first real run:**
+- **D1 REST parameter types.** The published API schema lists `params` as strings. If the API
+  coerced numbers or null to text, conditional writes (`status = ?11`, `awaiting_since IS ?12`)
+  would stop matching. `D1HttpClient.selfCheck()` runs first on every run and fails it red if
+  types don't round-trip.
+- **Whether a REST `batch` is one transaction,** as the binding's is. The client sends a batch as
+  one request; the docs say it "will be executed as a batch".
+- **Writes are not retried on 5xx or network errors**, since they may have been applied. The run
+  fails that source and the next run re-syncs from the unchanged cursor. A write that did apply
+  can leave one duplicate `action` log row (reopened / unblocked); thread and response writes are
+  conditional or idempotent.
+- **Workers Free CPU (10 ms) for API requests.** Each `/api` request verifies the Access JWT
+  (WebCrypto) and runs D1 queries; `/api/queue` runs 6. Not measured.
+- **Scheduled workflows run only from the default branch.** `main` has no commits yet, so nothing
+  runs on a schedule until this branch is merged.
+
 ## Scale and cost — verify before go-live
 
-- **Subrequest limit.** Gmail and Quo are both budgeted (see "Volume per cron run").
+- **Subrequest limit.** Not applicable to ingest since round 9 (see above).
 - **D1 reads and writes.** `syncThread` adds one SELECT per thread per sync, plus a
   response/failure write where relevant.
 
@@ -325,6 +380,12 @@ Round 4 added the `response` and `ingest_failure` tables while no database exist
 first real deploy, use `wrangler d1 migrations`.
 
 ---
+
+## Paused work
+
+- **Deleted-mail handling** (round 9, moved to round 10 by the owner): a fake-Gmail deletion helper
+  and 6 tests, 5 failing on the current code, are in `git stash` as
+  `round10-wip: deleted-mail handling`. No implementation was written.
 
 ## Open questions for the owner
 
