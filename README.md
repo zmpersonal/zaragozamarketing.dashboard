@@ -12,22 +12,24 @@ The rules the code must never break are in `CLAUDE.md`. Open questions and known
 
 The stack was chosen to be cheap, secure, and still standing if every subscription lapses:
 
-- **Cloudflare Workers (free) + D1 + static assets.** One Worker and one SQLite database. The
-  Worker serves the UI, the `/api` routes and `/hooks/quo`.
+- **Cloudflare Workers + D1 + static assets.** Two Workers and one SQLite database: `inhouse-ops`
+  serves the UI and the `/api` routes behind Access, and `inhouse-ops-hooks` serves `/hooks/quo`
+  and nothing else. Access on a Worker covers every path it serves, and Quo can't sign in, so the
+  webhook needs a Worker of its own (round 11).
 - **GitHub Actions (free) runs ingest hourly.** Gmail and Quo ingest run as plain Node and write
-  to D1 through Cloudflare's D1 REST API. Workers Free caps a run at 50 outbound requests and
-  10 ms of CPU, which ingest can't fit; an Actions runner has neither limit.
-- **Cost: $0 on the free tiers.** Round 8 said Workers Paid ($5/month) was required; with ingest
-  on Actions it isn't. The trade:
+  to D1 through Cloudflare's D1 REST API. It moved off the Worker in round 9, when Workers Free
+  capped a run at 50 outbound requests and 10 ms of CPU. Workers Paid lifts both, so this is now
+  a choice; it stays on Actions until two weeks of real operation say otherwise (HANDOFF).
+- **Cost: $5/month** — Workers Paid, bought in round 12. Everything else is on a free tier. The
+  trade that comes with ingest on Actions:
   - Email is checked roughly hourly, not every five minutes.
   - GitHub can delay scheduled runs by 15–60 minutes when it's busy.
-  - Phone is real-time: the Quo webhook on the Worker writes calls and texts as they happen.
-  - **Worker CPU:** measured locally, the busiest API routes use more than Workers Free's 10 ms
-    per request (the queue ~30 ms). Whether to pay for Workers ($5/month) or redesign the queue is
-    an open decision; see HANDOFF, "Worker CPU".
-  - Free-tier ceilings: 2,000 Actions minutes a month (private repo; the workflow is capped at
-    1,460 even in the worst case), 1,200 Cloudflare API requests per 5 minutes, and D1's
-    5 million rows read and 100,000 written per day.
+  - Phone is real-time: the Quo webhook writes calls and texts as they happen.
+  - **Worker CPU:** measured locally, the UI's requests use ~6–9 ms each (p90s 14–24 ms), and the
+    single-call queue ~17 ms. Against Workers Paid's 30 s per invocation that is a cost line, not
+    a limit. See HANDOFF, "Worker CPU".
+  - Ceilings that still bind: 2,000 Actions minutes a month (private repo; the workflow is capped
+    at 1,460 even in the worst case) and 1,200 Cloudflare API requests per 5 minutes.
 - **Cloudflare Access for login.** There's no password table. Each person signs in as
   themselves, and the Worker verifies the Access JWT again (signature, expiry, audience,
   email) before trusting it.
@@ -122,7 +124,10 @@ produces a second measurement.
     the webhook already recorded.
   - It runs as its own Worker, `inhouse-ops-hooks`, because the console sits behind Cloudflare
     Access, which can't exempt one path, and Quo can't sign in.
-  - Subscribing it in Quo is a human step: `RUNBOOK.md` §3.
+  - Subscribing it in Quo is a human step, and the last one: `RUNBOOK.md` §5. It is the only
+    part of the system that starts collecting on its own, so it goes on once everything else
+    works. A rate-limiting rule sits in front of it (§5.2): the endpoint is public, and on a paid
+    plan unauthenticated requests are billed rather than capped.
 
 ## Setup
 

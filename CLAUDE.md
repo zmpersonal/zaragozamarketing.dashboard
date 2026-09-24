@@ -8,8 +8,9 @@ One internal console. The repo is named for where it's hosted: Zaragoza Marketin
 subdomain. InHouse Wellness (INH), THI and ZM are meant to become tabs in this same console,
 not separate projects. **V1 content is InHouse Wellness customer service only.**
 
-It runs in three pieces (rounds 9–11), all on free tiers. The deploy steps are in `RUNBOOK.md`.
-- **Console Worker** `inhouse-ops` (`src/index.ts`, `wrangler.toml`), Workers Free, behind
+It runs in three pieces (rounds 9–11). Cost is $5/month: Workers Paid, bought in round 12;
+everything else is on a free tier. The deploy steps are in `RUNBOOK.md`.
+- **Console Worker** `inhouse-ops` (`src/index.ts`, `wrangler.toml`), Workers Paid, behind
   Cloudflare Access at Worker level. It serves the static UI (`public/index.html`, real API only,
   no mock data) and `/api/*`, reading and writing D1 (`schema.sql`) through its binding. No cron,
   no ingest, no webhook.
@@ -25,10 +26,13 @@ It runs in three pieces (rounds 9–11), all on free tiers. The deploy steps are
 
 No AI provider sits in the critical path.
 
-**Why the split, and what it costs.** Workers Free caps an invocation at 50 external fetches and
-10 ms of CPU, which ingest can't fit. Round 8 concluded Workers Paid ($5/month) was required;
-Julian is staying on the free tier instead, so ingest moved to Actions. **Workers Paid is no
-longer required.** The trade, recorded so nobody discovers it later:
+**Why the split, and what it costs.** Workers Free capped an invocation at 50 external fetches
+and 10 ms of CPU, which ingest can't fit, so round 9 moved ingest to Actions. **Round 12: Workers
+Paid ($5/month) is bought**, which lifts both caps (1,000 subrequests and 30 s of CPU per
+invocation, 15 minutes on a cron trigger), so a Worker cron is viable again. Ingest stays on
+Actions for now: it is a hardened path, and the freshness badge makes its failure visible. Revisit
+after two weeks of real operation (HANDOFF, "Ingest stays on GitHub Actions (round 12)"). The
+trade that buys, recorded so nobody discovers it later:
 - **Email is checked roughly hourly**, not every five minutes. A customer email can sit up to
   about an hour before it appears in the queue.
 - **GitHub can delay scheduled runs by 15–60 minutes under load**, so "hourly" can stretch to
@@ -38,17 +42,19 @@ longer required.** The trade, recorded so nobody discovers it later:
 - **Limits that now bind:** Cloudflare's API allows 1,200 requests per 5 minutes per token (every
   call blocked for 5 minutes past that); each run stays under 1,000 D1 statements. GitHub Free
   allows 2,000 Actions minutes a month for a private repo; the 2-minute job timeout caps the
-  worst case at 1,460. D1 Free allows 5 million rows read and 100,000 written a day.
-- **Worker CPU on Workers Free: close to the 10 ms limit, not comfortably under it (rounds 10–11,
-  measured locally).** The UI makes several small requests, each measured in workerd against a
-  local D1 of 4,365 fabricated threads (trimmed mean):
+  worst case at 1,460. D1 on Workers Paid includes 25 billion rows read and 50 million written a
+  month, which this workload is nowhere near.
+- **Worker CPU (rounds 10–11, measured locally).** On Workers Paid the ceiling is 30 s per
+  invocation, so these are a cost line, not a failure line; against Workers Free's 10 ms they were
+  not comfortably under it. Each request measured in workerd against a local D1 of 4,365
+  fabricated threads (trimmed mean):
   - one queue tier page ~6.6–8.6 ms
   - board ~6.4 ms
   - to-dos ~5.6 ms
   p90s run 14–24 ms. The single-call `GET /api/queue` (all tiers) is still ~17 ms. The cost is
   mostly the D1 binding turning rows into objects inside the isolate, plus a fixed cost per D1
-  call. Measure on Cloudflare after deploy (RUNBOOK §6). Error 1102s mean Workers Paid for the
-  console, or more query work. See HANDOFF, "Worker CPU".
+  call. Measure on Cloudflare after deploy (RUNBOOK §7); error 1102 is no longer expected. See
+  HANDOFF, "Worker CPU".
 
 ## Commands
 
@@ -403,10 +409,13 @@ public/freshness.mjs      last-sync classification, badges, empty/failed queue m
 public/paging.mjs         refresh that keeps pages the agent opened
 RUNBOOK.md                the ordered deploy steps, mine vs yours, and what can't be undone
 prove/*.mjs               run-by-hand source proofs; need real credentials (Gmail: GOOGLE_SERVICE_ACCOUNT_FILE).
+                          quo.mjs --quiet prints the phone-number ids only, reading no conversation.
                           Never in cron. backfill-known-senders.mjs (one-off), apply-known-senders.mjs
                           (setup, filters our own domain) and ingest-live.mjs write customer data to
                           files outside the repo only.
 scripts/ingest.mjs        hourly ingest entry point (GitHub Actions); logic in scripts/_ingest-run.mjs
+scripts/scan-history.mjs  pre-push guard (RUNBOOK §4.2): no consumer-domain address in any blob,
+                          commit message or author line reachable from the ref. Says where, never what.
 .github/workflows/ingest.yml  hourly schedule + manual run, keepalive, 2-minute timeout
 seeds/*.example.sql       shape of setup seeds; real seeds live outside the repo
 tests/*.test.mjs          node:test suites; tests/helpers has the D1 shim, fake Gmail, fake

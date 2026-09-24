@@ -5,6 +5,62 @@ still unproven.
 
 ---
 
+## Round 12 — the runbook in the right order, and two guards (2026-09-24, branch `claude/inh-round-12`, cut from `claude/inh-round-11`)
+
+Nothing was deployed, merged, pushed, or PR'd. No behaviour changed except the two items below.
+
+### What changed
+1. **`RUNBOOK.md` reordered.** Two orderings were wrong, and both put the risk first.
+   - **The lock now goes on before the data.** Old order: load ~716 customer addresses (§1), then
+     deploy and enable Access (§2) — so the public-shell window and any policy mistake happened
+     with a full database. New order: schema only, console Worker, Access, verify with a
+     non-listed address, *then* customer data. A wrong Access policy is now discovered against a
+     database with nothing in it.
+   - **The Quo webhook goes last.** Round 11 named 3.2 as the point of no easy return and then put
+     it before GitHub, making "phone flowing into a console with no email in it" the default path.
+     New order: console + Access → database → GitHub secrets, history scan, push, email ingest
+     green → hooks Worker, rate limit, webhook → Marianne.
+   - The "If you stop halfway" analysis is now a section of the runbook, rechecked against the new
+     order. Its conclusion changed: in this order there is no point where stopping is worse than
+     not starting, and the only irreversible act is the push (4.3), which 4.2 now guards.
+2. **A rate limit for the hooks Worker** (RUNBOOK §5.2). The endpoint is public by design and, on
+   a paid plan, unauthenticated requests are billed rather than capped.
+   - **Finding:** the WAF runs on zones, and a `workers.dev` hostname is not in a zone, so a
+     rate-limiting rule cannot be attached to it. The step therefore gives the hooks Worker a
+     custom domain on a zone first, and the Quo webhook URL becomes that domain. If the account
+     has no zone, the step says so plainly and what the alternative costs (HANDOFF, open question 9).
+   - Blocking Quo by accident is safe: it retries for ~27.5 hours and `webhook-id` dedupes.
+3. **`scripts/scan-history.mjs`:** a blocking pre-push scan of the full history of the ref being
+   pushed — every blob, commit message and author line — for addresses at 12 consumer mail
+   domains. It reports where, never what, so running it can't leak what it found.
+4. **`prove/quo.mjs --quiet`:** prints the phone-number ids and nothing else, reading only
+   `/v1/phone-numbers`. RUNBOOK §0.6 needed an id and was printing customer names, numbers and
+   message text to a terminal to get it.
+5. **Docs caught up with Workers Paid** ($5/month, bought this round): the workflow header,
+   CLAUDE.md ("Why the split", the CPU bullet, D1's ceilings), README ("Cost: $0" → $5/month, and
+   it still described one Worker serving `/hooks/quo`), HANDOFF (the 1102 decision is closed), and
+   RUNBOOK §7. The CPU measurements stand; against 30 s per invocation they are cost, not risk.
+6. **HANDOFF: ingest stays on GitHub Actions** (decision). A Worker cron is viable on Paid and
+   would drop the unverifiable keepalive and the scheduler delays, but it is a rewrite of the
+   hardened path that touches customer mail, and the freshness badge already makes the failure it
+   would remove visible. Revisit after two weeks of real operation.
+
+### Failing first, then passing
+- **History scan:** 6/6 failed (no script), 6/6 pass. 3 breaks, each caught by the right test:
+  scanning only the current tree (the deleted-address test), skipping commit messages (the
+  12-domain test), printing the address it found (the "never prints" assertion).
+- **Quiet mode:** 1/2 failed (`--quiet` was an unknown flag, so it read conversations); 2/2 pass.
+  2 breaks caught: printing the number and name as well, and falling through to the conversation
+  read.
+- **Totals:** 317 tests, 317 pass, 0 fail. `check` and `build` clean.
+
+### Run for real
+`node scripts/scan-history.mjs claude/inh-round-12`: 62 commits, 329 blobs, **CLEAN**.
+`claude/inh-round-5` and `-6` are already absent from this checkout; the runbook still deletes them,
+since another checkout may have them.
+
+---
+
 ## Round 11 — a cheap queue, visible failure, the real UI, and a runbook (2026-09-14, branch `claude/inh-round-11`, cut from `claude/inh-round-10`)
 
 Nothing was deployed, merged, pushed, or PR'd. All UI work used fabricated data on a local D1.

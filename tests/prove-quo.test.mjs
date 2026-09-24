@@ -9,9 +9,9 @@ import { join } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 
-function runProve(extraEnv = {}) {
+function runProve(extraEnv = {}, args = []) {
   const log = join(mkdtempSync(join(tmpdir(), 'prove-quo-')), 'requests.log');
-  const r = spawnSync(process.execPath, ['--import', './tests/helpers/quo-preload.mjs', 'prove/quo.mjs'], {
+  const r = spawnSync(process.execPath, ['--import', './tests/helpers/quo-preload.mjs', 'prove/quo.mjs', ...args], {
     cwd: ROOT, encoding: 'utf8', timeout: 30000,
     env: { ...process.env, QUO_API_KEY: 'test-key', PROVE_REQUEST_LOG: log, ...extraEnv },
   });
@@ -38,6 +38,22 @@ test('prove/quo.mjs only calls documented v1 endpoints', async () => {
 
 test('prove/quo.mjs fails clearly without QUO_API_KEY', async () => {
   const r = runProve({ QUO_API_KEY: '' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /QUO_API_KEY/);
+});
+
+// RUNBOOK §0 needs the phone-number id and nothing else. Reading conversations
+// to find it prints customer names, numbers and message text to a terminal.
+test('--quiet prints the phone-number ids only, and reads no conversation', async () => {
+  const r = runProve({}, ['--quiet']);
+  assert.equal(r.status, 0, `exit ${r.status}\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+  assert.equal(r.stdout, 'PN1\n');
+  assert.equal(r.stderr, '');
+  assert.deepEqual(r.paths, ['/v1/phone-numbers'], 'one request: the number list');
+});
+
+test('--quiet still fails clearly without QUO_API_KEY', async () => {
+  const r = runProve({ QUO_API_KEY: '' }, ['--quiet']);
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /QUO_API_KEY/);
 });

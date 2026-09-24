@@ -1,9 +1,12 @@
 # Hourly ingest: Gmail and Quo into D1, over Cloudflare's D1 REST API.
 #
-# The Worker (free plan) serves the dashboard, the API and the Quo webhook;
-# ingest runs here because Workers Free caps a run at 50 outbound requests and
-# 10 ms of CPU. Email is checked roughly hourly. GitHub can delay scheduled runs
-# by 15-60 minutes under load.
+# The console Worker serves the dashboard and the API; a second Worker serves the
+# Quo webhook. Ingest runs here because Workers Free capped a run at 50 outbound
+# requests and 10 ms of CPU. Round 12 bought Workers Paid, which lifts both, so
+# this is now a choice rather than a constraint: a hardened path stays where it is
+# until two weeks of real operation say otherwise (HANDOFF, "Ingest stays on
+# GitHub Actions"). What it costs: email is checked roughly hourly, and GitHub can
+# delay scheduled runs by 15-60 minutes under load.
 #
 # Minutes: GitHub Free allows 2,000 a month for a private repo. ~730 hourly runs;
 # a normal run takes well under a minute (1 billed minute), and the 2-minute job

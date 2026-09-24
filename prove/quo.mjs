@@ -10,6 +10,8 @@
  *
  * Run:  node prove/quo.mjs                 # first number on the account, last 7 days
  *       node prove/quo.mjs PN123abc --days 14
+ *       node prove/quo.mjs --quiet          # phone-number ids only: reads no
+ *                                           # conversation, prints no customer data
  * Needs: QUO_API_KEY  (Quo → Settings → API → Generate API key), in the shell
  *        or .dev.vars. Auth is the raw key in Authorization — no "Bearer ".
  *
@@ -34,10 +36,18 @@ const args = process.argv.slice(2);
 const daysAt = args.indexOf('--days');
 const DAYS = daysAt >= 0 ? Number(args[daysAt + 1]) : 7;
 const chosen = args.find((a, i) => a.startsWith('PN') && args[i - 1] !== '--days');
+const QUIET = args.includes('--quiet') || args.includes('-q');
 const SHOW = 10;
 
 const numbers = await listPhoneNumbers(env).catch((err) => fail(err.message));
 if (!numbers.length) fail('No phone numbers on this Quo account. Wrong key?');
+
+// RUNBOOK §0 only needs the id. Reading conversations to find it would print
+// customer names, numbers and message text to the terminal for no reason.
+if (QUIET) {
+  for (const n of numbers) console.log(n.id);
+  process.exit(0);
+}
 
 console.log('\n  Quo numbers:');
 for (const n of numbers) console.log('    ' + n.id + '  ' + n.number + '  ' + (n.name ?? ''));

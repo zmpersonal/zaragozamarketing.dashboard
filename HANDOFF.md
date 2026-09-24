@@ -381,7 +381,8 @@ repository inactivity, silently. GitHub documents this for public repos and does
   fails that source and the next run re-syncs from the unchanged cursor. A write that did apply
   can leave one duplicate `action` log row (reopened / unblocked); thread and response writes are
   conditional or idempotent.
-- **Workers Free CPU (10 ms): measured locally in round 10, over the limit.** See "Worker CPU".
+- **Worker CPU: measured locally in rounds 10–11.** Over Workers Free's 10 ms; comfortably inside
+  Workers Paid's 30 s, which is what the account is on since round 12. See "Worker CPU".
 - **Scheduled workflows run only from the default branch.** `main` has no commits yet, so nothing
   runs on a schedule until this branch is merged.
 
@@ -424,10 +425,13 @@ embedded in workerd):
   test records rows per statement, and a batch hides them.
 
 **Caveats:** a local machine, not the edge; 1 ms sampling; the production D1 path may differ.
-Measure on Cloudflare (Workers Observability) after deploy, RUNBOOK §6.
+Measure on Cloudflare (Workers Observability) after deploy, RUNBOOK §7.
 
-**If Cloudflare shows 1102s:** Workers Paid ($5/month) for the console Worker, or fewer rows per
-request (e.g. 25 per page) and fewer statements.
+**Settled in round 12: Workers Paid is bought.** The ceiling is 30 s of CPU per invocation, so
+none of these numbers is a failure risk any more and error 1102 is not expected. They stay here as
+cost information, and because the work that produced them (paging, slim rows, one grouped count)
+is worth keeping: it took the queue from 296 kB and ~30 ms to 12–22 kB and 6.6–8.6 ms. If
+Cloudflare ever does show a 1102, the next move is fewer rows per page and fewer statements.
 
 ## Round 11 UI run: what broke
 
@@ -474,6 +478,28 @@ So the webhook runs as `inhouse-ops-hooks` (`src/hooks.ts`, `wrangler.hooks.toml
 same database, signature-only. Preview URLs are off on both Workers. The alternative is a zone with
 hostname-based Access and a path Bypass, which the owner ruled out.
 
+## Ingest stays on GitHub Actions (round 12 decision)
+
+Workers Paid is bought, so the two limits that pushed ingest off the Worker in round 9 are gone:
+1,000 subrequests instead of 50, and 30 s of CPU per invocation (15 minutes on a cron trigger)
+instead of 10 ms. A Worker cron is viable again, and it would be better in three ways: email every
+five minutes instead of hourly, no 15–60 minute scheduler delays, and no keepalive — the
+workflow's API call that re-enables itself every 60 days is the one piece of this system nobody
+can verify until the day it doesn't work.
+
+**It stays on Actions anyway, for now.** The Actions path is hardened: bounded runs with a
+deadline, a redactor over everything it prints, per-item isolation, poison-pill skipping, partial-
+write recovery, and tests for all of it. Moving it is a rewrite of the path that touches customer
+mail, and the reason to move is comfort, not a failure. The failure it would remove — a silently
+disabled schedule — is already visible: `source.last_synced_at` drives a badge that turns amber at
+3 hours and red at 12 (invariant 11).
+
+**Revisit after two weeks of real operation**, with two questions answered from the console rather
+than from a guess: did the freshness badge ever go amber, and how late was the worst hourly run.
+If it never slipped, leave it. The rewrite would move `scripts/_ingest-run.mjs` behind a
+`scheduled()` handler on the console Worker (or a third Worker), keep `src/db/db.ts` as it is, and
+delete the keepalive step along with the Actions secrets.
+
 ## Scale and cost — verify before go-live
 
 - **Subrequest limit.** Not applicable to ingest since round 9 (see above).
@@ -506,6 +532,26 @@ first real deploy, use `wrangler d1 migrations`.
 6. **Mock UI login** `agent@inhousewellness.com` looks shared (invariant 8).
 7. **`prove/triage.mjs` duplicates the triage rules.** Import `src/lib/triage.ts` instead?
 8. **Stage vocabulary** and **weekend confirmation** are still open.
+9. **Is a domain on this Cloudflare account?** (round 12, blocks RUNBOOK §5.2.) The rate-limiting
+   rule asked for on the hooks Worker is a WAF rule, and the WAF runs on zones: a `workers.dev`
+   hostname is not in a zone, so no rule can be attached to it. The runbook therefore gives the
+   hooks Worker a custom domain (`hooks.<zone>`) first, and the Quo webhook URL is that domain. If
+   there is no zone on the account, the endpoint stays un-throttled and the alternative is
+   Cloudflare's Workers rate-limiting binding, which is code. Nothing unsigned reaches the
+   database either way; what is unbounded is billed invocations.
+
+## The pre-push history scan (round 12)
+
+`scripts/scan-history.mjs` is a blocking step before the first push (RUNBOOK §4.2). It reads every
+blob, commit message and author line reachable from a ref and exits 1 on any address at a consumer
+mail domain, reporting where and never what. `tests/no-personal-addresses.test.mjs` checks the
+working tree; a push publishes the history, and round 7's purge is a memory, not a check.
+
+- Run in round 12 against `claude/inh-round-12`: 62 commits, 329 blobs, **clean**.
+- `claude/inh-round-5` and `-6`, which held a customer address, no longer exist in this checkout.
+  The runbook still deletes them, because a checkout somewhere else may still have them.
+- The domain list is duplicated from `tests/no-personal-addresses.test.mjs` on purpose: neither
+  file may import an address list from anywhere that could be quietly shortened.
 
 ## Tooling notes
 - npm 11 `allowScripts` skipped the `esbuild` and `workerd` postinstall scripts. `build` works;
