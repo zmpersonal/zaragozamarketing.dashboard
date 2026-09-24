@@ -5,6 +5,58 @@ still unproven.
 
 ---
 
+## Round 13 — a rate limit that needs no zone (2026-09-24, branch `claude/inh-round-13`, cut from `claude/inh-round-12`)
+
+Nothing was deployed, merged, pushed, or PR'd. One behaviour change: the rate limit.
+
+### What changed
+1. **Cloudflare's Workers rate-limiting binding on the hooks Worker** (`[[ratelimits]]` in
+   `wrangler.hooks.toml`, `env.HOOK_RATE_LIMIT.limit({ key })` in `src/webhook.ts`). Round 12's WAF
+   route needed a zone; the account has none, and moving a live marketing site's nameservers for
+   one rule is the wrong trade. This runs inside the Worker: no zone, no custom domain, nothing to
+   configure after a deploy.
+   - **60 per 10 seconds per client IP.** Quo sends a few events a minute at most from its own
+     egress addresses, so real traffic sits ~50x below the limit and a retry storm still fits.
+     Period may only be 10 or 60.
+   - **Order:** path → method → rate limit → read body → verify. The HMAC over a full body is the
+     expensive part, so the limit sits in front of it. A 429 reads no body and touches no database,
+     and carries `Retry-After: 10`.
+   - **A cost guard, not a security control**, recorded in the code, CLAUDE.md invariant 10 and
+     HANDOFF: permissive, eventually consistent, counted per Cloudflare location rather than
+     globally. The signature is still the trust boundary. A missing binding passes everything
+     through on purpose — a cost guard must not become a phone outage.
+2. **RUNBOOK §5.2 rewritten.** The custom domain and WAF rule are gone; the step is now "check the
+   limit the deploy just created", with 90 quick POSTs that should turn from 401 into 429. The
+   webhook URL stays on workers.dev. §7's hooks-Worker bullet now watches 429s and says why the
+   per-location count makes the real ceiling higher.
+3. **Whole runbook re-checked end to end:** branch name and test count in §0.1, the scan and push
+   commands in §4.2–4.3, every `§n`/`step n.m` cross-reference, the irreversibility table (custom
+   domain removed from the reversible list), and the stop-halfway table, which now splits §5 into
+   5.1–5.2 (live, limited, nothing subscribed, nothing can reach it) and 5.3 on (collecting).
+4. **Zone and free-plan audit.** The custom-domain option is recorded in HANDOFF as a future
+   upgrade if a zone ever exists, not as a gap. Two stale passages fixed: HANDOFF still had the
+   console Worker serving the webhook on Workers Free, and the round-11 webhook-split note now
+   records that there is no zone at all.
+
+### Failing first, then passing
+- 5 of 8 failed first (the binding, the 429, the order, the key, the config); 3 were guards that
+  pass without the feature and had to keep passing. 8/8 after.
+- 6 breaks, each caught by the right test: reading the body before the limit (the order test and
+  the "body never read" test); logging instead of returning 429; keying every caller into one
+  bucket; adding the binding to the console Worker too; period 30, which the API doesn't allow and
+  which would also put `Retry-After` out of step; a limit of 2 per 10 s, tight enough that real Quo
+  traffic would trip it.
+- **Totals:** 325 tests, 325 pass, 0 fail. `check` and `build` clean.
+
+### Found by the build
+`[[ratelimits]]` takes `name`, not `binding`, in wrangler 4.131.1: the documented `binding` key is
+rejected outright ("bindings must have a string `name` field"). The tests passed either way — they
+exercise the handler, not wrangler's parser — and `npm run build` is what caught it. With `name`,
+the dry run reports `env.HOOK_RATE_LIMIT (60 requests/10s)  Rate Limit`. The config test now pins
+`name`.
+
+---
+
 ## Round 12 — the runbook in the right order, and two guards (2026-09-24, branch `claude/inh-round-12`, cut from `claude/inh-round-11`)
 
 Nothing was deployed, merged, pushed, or PR'd. No behaviour changed except the two items below.

@@ -1,16 +1,16 @@
-# Deploy runbook: from `claude/inh-round-12` to Marianne logging in
+# Deploy runbook: from `claude/inh-round-13` to Marianne logging in
 
-Written in round 11, reordered in round 12. **Nothing here has been run.** Every step is marked
-**[YOU]** (Julian and the owner, with the Cloudflare, GitHub, Google and Quo accounts) or
-**[CLAUDE]**. Steps marked **IRREVERSIBLE** can't simply be undone; read the note before running
-them.
+Written in round 11, reordered in round 12, rate limit settled in round 13. **Nothing here has
+been run.** Every step is marked **[YOU]** (Julian and the owner, with the Cloudflare, GitHub,
+Google and Quo accounts) or **[CLAUDE]**. Steps marked **IRREVERSIBLE** can't simply be undone;
+read the note before running them.
 
 What gets deployed:
 
 | Piece | Where | Protected by |
 |---|---|---|
 | `inhouse-ops`: dashboard and `/api/*` | Cloudflare Worker, `inhouse-ops.<subdomain>.workers.dev` | Cloudflare Access (Worker-level) |
-| `inhouse-ops-hooks`: `/hooks/quo` only | Cloudflare Worker, a custom domain if there is a zone (§5.2), else `inhouse-ops-hooks.<subdomain>.workers.dev` | Quo's webhook signature (no Access: Quo can't sign in), plus a rate-limiting rule |
+| `inhouse-ops-hooks`: `/hooks/quo` only | Cloudflare Worker, `inhouse-ops-hooks.<subdomain>.workers.dev` | Quo's webhook signature (no Access: Quo can't sign in), with a rate limit inside the Worker |
 | D1 database `inhouse-ops` (`4f562bdf-…`) | Cloudflare D1 | Bound to both Workers; written by the Actions run over the REST API |
 | Hourly ingest (Gmail, Quo backstop) | GitHub Actions, `.github/workflows/ingest.yml` | Actions secrets |
 
@@ -27,15 +27,15 @@ the console Worker would be blocked for Quo the moment Access is on.
   is switched on, so there is no window where phone is flowing into a console nobody can use.
 
 Placeholders used below: `<subdomain>` is the account's workers.dev subdomain; `PN…` is the Quo
-phone-number id; `<team>` is the Zero Trust team name; `<zone>` is a domain already on this
-Cloudflare account.
+phone-number id; `<team>` is the Zero Trust team name. Nothing here needs a domain on Cloudflare:
+both Workers run on workers.dev.
 
 ---
 
 ## 0. Before you start
 
-1. **[YOU]** `cd` into a checkout of `claude/inh-round-12` and run
-   `npm install && npm run check && npm test && npm run build`. All must pass (317 tests, round 12).
+1. **[YOU]** `cd` into a checkout of `claude/inh-round-13` and run
+   `npm install && npm run check && npm test && npm run build`. All must pass (325 tests, round 13).
 2. **[YOU]** `npx wrangler login` and choose the account `0ef0279e4af302865cd2009458864c1b`.
    Confirm with `npx wrangler whoami`.
 3. **[YOU]** Confirm the database exists and the id matches `wrangler.toml`:
@@ -157,7 +157,7 @@ Only now does anything personal leave this machine. Each command below writes to
    ```bash
    git branch -D claude/inh-round-5 claude/inh-round-6   # if they still exist anywhere: they held a customer address
    git branch --list 'claude/inh-round-*'                # confirm 5 and 6 are gone
-   node scripts/scan-history.mjs claude/inh-round-12
+   node scripts/scan-history.mjs claude/inh-round-13
    ```
    - It must print **CLEAN**. It reads every blob, commit message and author line reachable from
      that branch, and names where a match is, never what it found.
@@ -168,7 +168,7 @@ Only now does anything personal leave this machine. Each command below writes to
 3. **[YOU] IRREVERSIBLE (first push):** put this branch on GitHub as `main`.
    - Push only this branch.
    ```bash
-   git push origin claude/inh-round-12:refs/heads/main
+   git push origin claude/inh-round-13:refs/heads/main
    ```
    Then GitHub → Settings → General → **Default branch** = `main`. The hourly schedule only runs
    from the default branch.
@@ -192,39 +192,35 @@ Only now does anything personal leave this machine. Each command below writes to
      → `404`.
    - And `curl -s -X POST https://inhouse-ops-hooks.<subdomain>.workers.dev/hooks/quo -d '{}'` →
      `401`: no secret yet, fails closed.
-2. **[YOU]** Put a rate limit in front of it. This endpoint is public and unauthenticated by
-   design; on Workers Paid, unlimited requests to it are billed rather than capped.
-   - **Cloudflare's WAF, including rate-limiting rules, runs on zones. A `workers.dev` hostname is
-     not in a zone, so no rule can be attached to it.** Give the hooks Worker a custom domain first:
-     - Workers & Pages → `inhouse-ops-hooks` → **Settings → Domains & Routes → Add → Custom domain**
-       → `hooks.<zone>` (a domain already on this Cloudflare account). Cloudflare adds the DNS
-       record and the route; deleting the custom domain later undoes both.
-     - The webhook URL for step 3 is then `https://hooks.<zone>/hooks/quo`.
-   - Then **Security → WAF → Rate limiting rules → Create rule** on that zone (the Free plan
-     includes one):
-     - Name: `hooks-quo`
-     - Expression: `(http.host eq "hooks.<zone>" and http.request.uri.path eq "/hooks/quo")`
-     - Count by: IP (Free's only characteristic)
-     - Requests: `20` — Period: the shortest offered (10 seconds on Free)
-     - Action: **Block**, for the duration offered (10 seconds on Free)
-   - Check it: thirty quick unsigned POSTs should turn from `401` into `429`.
-     ```bash
-     for i in $(seq 1 30); do curl -s -o /dev/null -w "%{http_code} " -X POST https://hooks.<zone>/hooks/quo -d '{}'; done; echo
-     ```
+2. **[YOU]** Check the rate limit, which that deploy just created. Nothing to configure: the
+   `[[ratelimits]]` binding in `wrangler.hooks.toml` is part of the Worker (60 requests per 10
+   seconds per client IP). The endpoint is public and unauthenticated by design, and verifying a
+   delivery means reading the whole body and running an HMAC over it, so this is what stops a
+   stranger spending our money.
+
+   Send 200 unsigned POSTs, ten at a time, so they land inside one 10-second window:
+   ```bash
+   seq 1 200 | xargs -P 10 -I{} curl -s -o /dev/null -w "%{http_code}\n" \
+     -X POST -d '{}' https://inhouse-ops-hooks.<subdomain>.workers.dev/hooks/quo | sort | uniq -c
+   ```
+   - Expect a mix: some `401` (under the limit, so the signature was checked and refused) and the
+     rest `429`. The split won't be exactly 60/140 — the count is per Cloudflare location.
+   - Wait ten seconds, POST once more, and it is a `401` again.
+   - All `401` and no `429` means the binding didn't deploy. Tell Claude; don't carry on with an
+     unlimited public endpoint.
+   - This costs 200 Worker invocations, a fraction of a cent.
    - Blocking Quo by accident is safe: Quo retries a failed delivery for about 27.5 hours, and the
      `webhook-id` dedupe makes a retry a no-op if the first one did land. Real Quo traffic is a few
-     events a minute at most.
-   - **If there is no zone on this Cloudflare account**, this rule cannot be created. Say so and
-     carry on: the endpoint is still safe (nothing unsigned reaches the database), but it is
-     un-throttled, so watch the Worker's request count in §7 and tell Claude — the alternative is
-     Cloudflare's Workers rate-limiting binding, which is a code change.
+     events a minute at most, some fifty times below the limit.
+   - This is a cost guard, not a security control. It is permissive and eventually consistent, and
+     counted per Cloudflare location rather than globally, so the real ceiling is higher than 60.
+     What keeps the database safe is the signature, which nothing gets past.
 3. **[YOU] IRREVERSIBLE (real customer events start flowing):** create the Quo webhook, and pipe its
-   signing key straight into the Worker secret so it never lands on screen or disk. Use the URL from
-   step 2.
+   signing key straight into the Worker secret so it never lands on screen or disk.
    ```bash
    curl -sS https://api.quo.com/webhooks \
      -H "Authorization: $QUO_API_KEY" -H "Quo-Api-Version: 2026-03-30" -H "Content-Type: application/json" \
-     -d '{"url":"https://hooks.<zone>/hooks/quo","label":"inhouse-ops","resourceIds":["PN…"],"events":["message.received","message.delivered","message.undelivered","message.failed","call.completed","call.missed"]}' \
+     -d '{"url":"https://inhouse-ops-hooks.<subdomain>.workers.dev/hooks/quo","label":"inhouse-ops","resourceIds":["PN…"],"events":["message.received","message.delivered","message.undelivered","message.failed","call.completed","call.missed"]}' \
      | tee >(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const d=JSON.parse(s).data;console.error("webhook id:",d.id)})' >/dev/null) \
      | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).data.key))' \
      | npx wrangler secret put QUO_WEBHOOK_SECRET -c wrangler.hooks.toml
@@ -260,9 +256,11 @@ Only now does anything personal leave this machine. Each command below writes to
   - Round 11 measured the UI's requests locally at ~6–9 ms each, with p90s of 14–24 ms. On Workers
     Paid the ceiling is 30 s per invocation, so these are a cost line, not a failure line, and
     error 1102 is no longer expected. If you ever see one, tell Claude.
-- **[YOU] Hooks Worker:** check its request count. Requests that are not from Quo are unsigned,
-  rejected, and billed. A count far above Quo's own traffic means the rate-limiting rule in §5.2
-  isn't doing its job (or was never created).
+- **[YOU] Hooks Worker:** check its request count, and how many answers are `429`. Requests that
+  are not from Quo are unsigned, rejected, and still billed; the limit (§5.2) keeps what one
+  address can spend small, but it counts per Cloudflare location, so a spread-out flood costs more
+  than 60 per 10 seconds would suggest. A count far above Quo's own traffic with no `429`s means
+  the limit isn't running. Steady `429`s with phone still arriving is the limit doing its job.
 - **[YOU] D1 usage:** Cloudflare dashboard → D1 → `inhouse-ops` → Metrics. Workers Paid includes
   25 billion rows read and 50 million written a month; this workload is nowhere near either.
 - **[YOU] Batch atomicity (optional, settles a HANDOFF question):**
@@ -284,13 +282,13 @@ Only now does anything personal leave this machine. Each command below writes to
 Nothing in this runbook changes Gmail or Quo. The Google scope is `gmail.readonly` and Quo is read
 plus a subscription: no labels, no marking read, no deletions.
 
-Everything else is reversible: `wrangler rollback`, editing the Access policy, deleting the custom
-domain, re-running the idempotent seeds, and rotating secrets with `wrangler secret put` /
-`gh secret set`.
+Everything else is reversible: `wrangler rollback`, editing the Access policy, re-running the
+idempotent seeds, and rotating secrets with `wrangler secret put` / `gh secret set`.
 
 ## If you stop halfway
 
-Rechecked for this order in round 12. Each row is the state if you stop after that section.
+Rechecked for this order in round 12, and again in round 13. Each row is the state if you stop
+after that section.
 
 | Stopped after | State | To back out |
 |---|---|---|
@@ -299,7 +297,8 @@ Rechecked for this order in round 12. Each row is the state if you stop after th
 | §2 | The console is live and locked, and shows an honest empty state. **The safest place to stop.** | Delete the Worker, or leave it. |
 | §3 | ~716 customer addresses in D1, behind Access. Nothing is ingesting, so nothing new arrives. | Delete the rows. |
 | §4 | Email syncs hourly and the queue fills. Phone shows red "never synced", which is true: it isn't connected. Quo's own app still has the texts, so nothing is lost, only un-consoled. | Actions → Ingest → disable the workflow. The push to `main` stays. |
-| §5 | Everything runs. Calls and texts arrive in seconds. | `DELETE /webhooks/{id}`, and disable the workflow. |
+| §5.1–5.2 | The webhook Worker is live and rate-limited, but nothing is subscribed, so it only ever answers 404, 401 or 429. Nothing reaches it. | Delete the Worker, or leave it. |
+| §5.3 on | Everything runs. Calls and texts arrive in seconds. | `DELETE /webhooks/{id}`, and disable the workflow. |
 
 **Is there a point after which stopping is worse than not starting?** Not in this order, with one
 exception: step **4.3**, the push, is the only genuinely irreversible act, and 4.2 is the check that

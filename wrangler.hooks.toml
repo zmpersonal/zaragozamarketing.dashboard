@@ -10,6 +10,21 @@ workers_dev = true
 # A preview URL is another hostname; keep only the one we configure.
 preview_urls = false
 
+# A cost guard on a public endpoint (round 13). Verifying a delivery means
+# reading the whole body and running an HMAC over it; without this, anyone can
+# make us do that as often as they like, and on Workers Paid that is billed, not
+# capped. Cloudflare's WAF can't help: rate-limiting rules run on zones, and
+# workers.dev is not in one.
+#
+# 60 per 10 s per client IP, per Cloudflare location. Quo sends a few events a
+# minute at most, from its own egress addresses, so real traffic is ~50x below
+# this and a retry storm still fits. It is permissive and eventually consistent
+# by design; the signature remains the trust boundary (src/webhook.ts).
+[[ratelimits]]
+name = "HOOK_RATE_LIMIT"
+namespace_id = "1"
+simple = { limit = 60, period = 10 }
+
 [[d1_databases]]
 binding = "DB"
 database_name = "inhouse-ops"

@@ -14,13 +14,38 @@ export interface HooksEnv {
   DB: D1Database | Db;
   /** whsec_... signing key returned when the webhook is created (Standard Webhooks). */
   QUO_WEBHOOK_SECRET: string;
+  /** Rate-limiting binding ([[ratelimits]] in wrangler.hooks.toml). Optional: see the note below. */
+  HOOK_RATE_LIMIT?: RateLimit;
 }
+
+/** The `period` of that binding. Sent as Retry-After, so the two must agree. */
+export const RATE_LIMIT_PERIOD_SECONDS = 10;
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 
 export async function handleQuoWebhook(req: Request, env: HooksEnv): Promise<Response> {
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+
+  // A cost guard, and it has to sit here: verifying means reading the whole body
+  // and running an HMAC over it, and this endpoint is public, so anyone can ask
+  // us to do that as often as they like. Cloudflare's WAF can't do it for us —
+  // rate-limiting rules run on zones and workers.dev is not in one (round 12).
+  //
+  // It is NOT a security control. The binding is permissive and eventually
+  // consistent, and counts per Cloudflare location rather than globally, so the
+  // real ceiling is a multiple of the configured one. The signature below stays
+  // the trust boundary. An unconfigured binding passes through on purpose: a
+  // cost guard must not turn a config slip into a phone outage.
+  if (env.HOOK_RATE_LIMIT) {
+    const { success } = await env.HOOK_RATE_LIMIT.limit({ key: req.headers.get('cf-connecting-ip') ?? 'no-client-ip' });
+    if (!success) {
+      return new Response(JSON.stringify({ error: 'Too many requests' }), {
+        status: 429,
+        headers: { 'content-type': 'application/json', 'retry-after': String(RATE_LIMIT_PERIOD_SECONDS) },
+      });
+    }
+  }
 
   // Read the raw text once: the signature covers these exact bytes.
   const raw = await req.text();

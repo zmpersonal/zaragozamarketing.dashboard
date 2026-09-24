@@ -126,8 +126,11 @@ produces a second measurement.
     Access, which can't exempt one path, and Quo can't sign in.
   - Subscribing it in Quo is a human step, and the last one: `RUNBOOK.md` §5. It is the only
     part of the system that starts collecting on its own, so it goes on once everything else
-    works. A rate-limiting rule sits in front of it (§5.2): the endpoint is public, and on a paid
-    plan unauthenticated requests are billed rather than capped.
+    works.
+  - A rate limit runs inside the Worker, before the body is read: 60 requests per 10 seconds per
+    client IP, then 429. The endpoint is public, and on a paid plan unauthenticated requests are
+    billed rather than capped. It is a cost guard, not a trust boundary — Cloudflare's WAF can't
+    do it here, because rate-limiting rules run on zones and workers.dev is not in one.
 
 ## Setup
 

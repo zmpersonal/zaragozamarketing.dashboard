@@ -308,8 +308,9 @@ helpers.
 ## Ingest on GitHub Actions (round 9)
 
 **What moved.** Ingest runs hourly on GitHub Actions and writes to D1 over the REST API. The
-Worker (Workers Free) keeps the UI, the API and the Quo webhook. Owner decision: Julian stays on
-the free tier.
+console Worker keeps the UI and the API; the webhook moved to its own Worker in round 11. Owner
+decision at the time: stay on Workers Free. Superseded in round 12 — Workers Paid is bought, and
+ingest stays on Actions as a choice; see "Ingest stays on GitHub Actions (round 12 decision)".
 
 **The trade, recorded:**
 - Email reaches the queue roughly hourly instead of within five minutes.
@@ -476,7 +477,8 @@ been blocked the moment Access was turned on, and phone would have silently gone
 
 So the webhook runs as `inhouse-ops-hooks` (`src/hooks.ts`, `wrangler.hooks.toml`): no UI, no API,
 same database, signature-only. Preview URLs are off on both Workers. The alternative is a zone with
-hostname-based Access and a path Bypass, which the owner ruled out.
+hostname-based Access and a path Bypass, which the owner ruled out — and round 13 established that
+this Cloudflare account has no zone at all.
 
 ## Ingest stays on GitHub Actions (round 12 decision)
 
@@ -532,13 +534,47 @@ first real deploy, use `wrangler d1 migrations`.
 6. **Mock UI login** `agent@inhousewellness.com` looks shared (invariant 8).
 7. **`prove/triage.mjs` duplicates the triage rules.** Import `src/lib/triage.ts` instead?
 8. **Stage vocabulary** and **weekend confirmation** are still open.
-9. **Is a domain on this Cloudflare account?** (round 12, blocks RUNBOOK §5.2.) The rate-limiting
-   rule asked for on the hooks Worker is a WAF rule, and the WAF runs on zones: a `workers.dev`
-   hostname is not in a zone, so no rule can be attached to it. The runbook therefore gives the
-   hooks Worker a custom domain (`hooks.<zone>`) first, and the Quo webhook URL is that domain. If
-   there is no zone on the account, the endpoint stays un-throttled and the alternative is
-   Cloudflare's Workers rate-limiting binding, which is code. Nothing unsigned reaches the
-   database either way; what is unbounded is billed invocations.
+9. ~~**Is a domain on this Cloudflare account?**~~ Answered in round 13: no, and moving a live
+   marketing site's nameservers for one WAF rule is the wrong trade. The limit runs inside the
+   Worker instead; see "Rate limiting the public webhook" below.
+
+## Rate limiting the public webhook (round 13)
+
+`/hooks/quo` is public and unauthenticated by design, and verifying a delivery means reading the
+whole body and running an HMAC over it. On Workers Paid that work is billed rather than capped, so
+something has to bound what a stranger can make us do.
+
+**Not the WAF.** Rate-limiting rules are a zone product, and a `workers.dev` hostname is not in a
+zone (round 12). The zone route needs a custom domain on a domain this Cloudflare account holds,
+and the account holds none.
+
+**The Workers rate-limiting binding instead** (GA September 2025): `[[ratelimits]]` in
+`wrangler.hooks.toml`, `env.HOOK_RATE_LIMIT.limit({ key })` inside the Worker. No zone, no custom
+domain, nothing to configure after a deploy.
+
+- **60 requests per 10 seconds per client IP.** Quo sends a few events a minute at most, from its
+  own egress addresses, so real traffic sits about fifty times below the limit and a retry storm
+  still fits. Period may only be 10 or 60.
+- **Order matters, and it is tested:** path → method → rate limit → read body → verify. The HMAC
+  is the expensive part, so the limit has to be in front of it. A 429 reads no body and touches no
+  database.
+- **It is a cost guard, not a security control.** The binding is documented as permissive and
+  eventually consistent, and it counts per Cloudflare location, not globally, so the real ceiling
+  is a multiple of 60. Nothing about it decides what is trusted: the signature does, and it is
+  unchanged.
+- **A missing binding passes everything through**, on purpose. Failing closed would turn a config
+  slip into a phone outage, and what it would be protecting is a bill, not the data.
+- **Blocking Quo by accident is safe:** Quo retries for about 27.5 hours, and `webhook_delivery`
+  dedupes by `webhook-id`, so a retry after a 429 is either the first successful write or a no-op.
+- **Future upgrade, not a gap:** if a domain is ever on this Cloudflare account, a custom domain on
+  the hooks Worker plus a WAF rate-limiting rule would stop the flood at the edge, before a Worker
+  invocation is billed at all. The binding can stay as the inner limit. Nothing needs it today.
+- **Config key:** `[[ratelimits]]` entries take `name`, not the documented `binding`, in wrangler
+  4.131.1, which rejects `binding` outright. The dry-run build is what caught it; the unit tests
+  can't, since they exercise the handler and not wrangler's parser. If a wrangler upgrade ever
+  renames it back, `npm run build` will say so.
+- Tests: `tests/quo-webhook-ratelimit.test.mjs`. Verified after deploy in RUNBOOK §5.2, and
+  monitored in §7.
 
 ## The pre-push history scan (round 12)
 

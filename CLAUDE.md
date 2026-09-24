@@ -18,7 +18,8 @@ everything else is on a free tier. The deploy steps are in `RUNBOOK.md`.
   `/hooks/quo`, same D1 database, no Access.
   - Access on a Worker covers every path and can only be bypassed whole-Worker, and Quo can't sign
     in. So the webhook can't share the console Worker (round 11).
-  - It trusts only the signature (invariant 10).
+  - It trusts only the signature (invariant 10), behind a rate limit that caps what one client IP
+    can make it spend (round 13).
 - **GitHub Actions, hourly** (`.github/workflows/ingest.yml` → `scripts/ingest.mjs`): runs Gmail
   and Quo ingest as plain Node, writing to the same D1 database through Cloudflare's D1 REST API
   (`src/db/d1-http.ts`). The ingest code, triage rules and clock are the same code either way;
@@ -366,6 +367,16 @@ Quo's versioned docs for API 2026-03-30, over the raw body before trusting it
 - **Replay window:** 5 minutes, in either direction.
 - **Returns 401** on any failure: the legacy `openphone-signature` header, a re-serialized body,
   a millisecond timestamp, and an unset or non-base64 secret (fail closed).
+- **A rate limit runs before the body is read** (round 13). The order is path, method, rate limit,
+  read body, verify; verifying means an HMAC over the whole body, and this endpoint is public.
+  `[[ratelimits]]` in `wrangler.hooks.toml`: 60 per 10 s per client IP, then 429 with `Retry-After`.
+  - It is a **cost guard, not part of the trust boundary**: permissive, eventually consistent, and
+    counted per Cloudflare location rather than globally.
+  - A missing binding passes everything through, deliberately: a cost guard must not become a
+    phone outage. The signature is what protects the database.
+  - Cloudflare's WAF can't do this: rate-limiting rules run on zones, and workers.dev is not in
+    one (round 12).
+  - Tests: `tests/quo-webhook-ratelimit.test.mjs`.
 - Tests: `tests/quo-webhook.test.mjs`.
 - Any new public webhook needs the same: verify first, fail closed, and test both a valid and an
   invalid signature.
@@ -388,7 +399,7 @@ Quo's versioned docs for API 2026-03-30, over the raw body before trusting it
 ```
 src/index.ts              console Worker: auth (Access JWT), /api routes (paged queue and to-dos). No ingest, no cron, no webhook.
 src/hooks.ts              hooks Worker: /hooks/quo only (no Access)
-src/webhook.ts            the Quo webhook handler: verify, dedupe by webhook-id, syncQuoActivity
+src/webhook.ts            the Quo webhook handler: rate limit, verify, dedupe by webhook-id, syncQuoActivity
 src/ingest/gmail.ts       Gmail threads (service-account auth) → timeline → syncThread (customer = first inbound sender)
 src/ingest/quo.ts         Quo v1 messages + calls since source.sync_cursor → syncThread
 src/ingest/chat.ts        provider-agnostic chat → syncThread (not routed yet)
