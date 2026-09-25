@@ -21,9 +21,9 @@ database_id = "4f562bdf-560b-4c82-a84e-554aa8c2bcb7"
 # wrangler.hooks.toml.
 
 [vars]
-ACCESS_TEAM = "CHANGE_ME"           # <team>.cloudflareaccess.com
-ACCESS_AUD  = "CHANGE_ME"           # Access app audience tag
-OWNERS      = "you@inhousewellness.com"
+ACCESS_TEAM = "dark-frost-948c"
+ACCESS_AUD  = "48d796b48e451af9b69356a275b0b902a2ae9d622f1101c44eec5d3bdbcce2d9"
+OWNERS      = "julian@inhousewellness.com, accounts@inhousewellness.com"
 
 # This Worker has no secrets. QUO_WEBHOOK_SECRET belongs to the hooks Worker (wrangler.hooks.toml).
 #
