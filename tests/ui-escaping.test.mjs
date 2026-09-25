@@ -72,7 +72,7 @@ test('index.html builds markup only from literals and the tested render function
   const script = html.slice(html.indexOf('<script type="module">'));
   const sinks = [...script.matchAll(/(?:\.innerHTML\s*=|insertAdjacentHTML\(\s*'[a-z]+'\s*,)\s*([\s\S]*?);\s*\n/g)];
   assert.ok(sinks.length >= 8, `found ${sinks.length} sinks`);
-  const ALLOWED = ['threadHeaderHtml', 'historyHtml', 'todoRowHtml', 'matrixCellHtml', 'renderSection', 'sectionThreads', 'freshnessBadgeHtml', 'emptyQueueHtml', 'todoListStatusHtml'];
+  const ALLOWED = ['threadHeaderHtml', 'historyHtml', 'todoRowHtml', 'matrixCellHtml', 'renderSection', 'sectionThreads', 'freshnessBadgeHtml', 'emptyQueueHtml', 'todoListStatusHtml', 'reportHtml', 'unsubscribeHtml', 'assigneeHtml'];
   for (const [statement, rhs] of sinks) {
     const noLiterals = rhs.replace(/'(?:[^'\\]|\\.)*'/g, 'LIT').replace(/`(?:[^`\\]|\\.)*`/g, 'LIT');
     const rest = stripAllowedCalls(noLiterals, ALLOWED)

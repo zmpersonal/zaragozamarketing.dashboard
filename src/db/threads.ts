@@ -64,6 +64,8 @@ export interface ThreadObservation {
   newest_outbound_at: number | null;
   timeline: Observed[];
   is_automated?: 0 | 1;
+  /** Raw List-Unsubscribe headers, JSON {h, post}. Undefined leaves the stored value alone. */
+  unsubscribe?: string | null;
   /** Classifier verdict. Written only while no human has set triage (triage_by IS NULL). */
   triage?: { tier: 'customer' | 'bulk' | 'spam'; score: number; signals: { code: string; why: string }[] };
 }
@@ -83,15 +85,16 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
       INSERT INTO thread (
         id, source_id, brand_id, channel, subject, customer_name, customer_handle,
         preview, status, is_automated, conversation_started_at, last_inbound_at,
-        last_outbound_at, awaiting_since, triage, triage_score, triage_signals, waits_pending
-      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14, COALESCE(?15, 'customer'), COALESCE(?16, 0), ?17, ?18)
+        last_outbound_at, awaiting_since, triage, triage_score, triage_signals, waits_pending,
+        unsubscribe
+      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14, COALESCE(?15, 'customer'), COALESCE(?16, 0), ?17, ?18, ?19)
       ON CONFLICT(id) DO NOTHING
     `).bind(
       o.id, o.source_id, o.brand_id, o.channel, o.subject, o.customer_name, o.customer_handle,
       o.preview, state.status, o.is_automated ?? 0, o.conversation_started_at,
       o.newest_inbound_at ?? o.conversation_started_at, o.newest_outbound_at, state.awaiting_since,
       o.triage?.tier ?? null, o.triage?.score ?? null, o.triage ? JSON.stringify(o.triage.signals) : null,
-      waits.length ? 1 : 0,
+      waits.length ? 1 : 0, o.unsubscribe ?? null,
     ).run();
     if (res.meta.changes === 0) return 'skipped';
     if (waits.length) {
@@ -122,6 +125,7 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
       customer_name    = CASE WHEN ?2 THEN ?3 ELSE customer_name END,
       customer_handle  = CASE WHEN ?2 THEN ?4 ELSE customer_handle END,
       preview          = COALESCE(?5, preview),
+      unsubscribe      = COALESCE(?20, unsubscribe),
       is_automated     = COALESCE(?6, is_automated),
       last_inbound_at  = MAX(last_inbound_at, COALESCE(?7, last_inbound_at)),
       last_outbound_at = CASE
@@ -152,7 +156,7 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
     existing.status, existing.awaiting_since, existing.last_inbound_at, existing.last_outbound_at,
     state.unblocked ? 1 : 0,
     o.triage?.tier ?? null, o.triage?.score ?? null, o.triage ? JSON.stringify(o.triage.signals) : null,
-    o.subject ?? null,
+    o.subject ?? null, o.unsubscribe ?? null,
   ).run();
 
   if (res.meta.changes === 0) return 'skipped';

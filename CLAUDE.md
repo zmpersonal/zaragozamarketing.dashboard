@@ -251,7 +251,10 @@ tier is shown, and every non-customer verdict carries its reasons to the UI.
 - **Phone content is triaged by the same module** (round 14). A voicemail transcript or a text
   has no headers, so `classifyContent()` in `src/lib/triage.ts` judges the words: spam or nothing,
   never bulk, every match carrying its reason.
-  - Rules today: `google_listing` and `google_verification`, the owner's, for this line.
+  - Rules today: `google_listing`, `google_verification` and `press_to_continue`, the owner's, for
+    this line. "Press 1" is the strongest of the three — 46 of 51 real voicemail transcripts say
+    it, no human leaving a voicemail does, and it keeps working when the campaign changes what it
+    is selling.
   - They are deliberately tight — the words must be within a sentence of each other, and it is the
     noun "verification", never "verify" — because a customer saying "I found you on Google, can
     you verify my order?" must stay in Needs reply.
@@ -277,11 +280,20 @@ Business time is America/Chicago, Mon–Fri 08:00–17:00. Never wall-clock.
   - **Any clock change must keep both transitions tested.** They fail differently: November
     passed while March hung.
 - `responseMinutes()` in `src/lib/thread-state.ts` is the response clock.
-- **Gap:**
-  - `thread.first_response_mins` is never written.
-  - The UI (`public/index.html`) computes ages, the "Over 24h" filter and the heat colours from
-    `awaiting_since`, but in wall-clock `Date.now()` hours. That violates this rule, and it has
-    to change before the admin report exists.
+- **The admin report reads `response`** (`src/report.ts`, round 15, owners only): median first
+  response per channel over a rolling window, outstanding work bucketed by business age, and the
+  last 7 days of answers with the agent's own note and a deep link into Gmail or Quo. Median, not
+  mean: at two real emails a day one outlier moves a mean by hours. Bulk and spam are excluded
+  from every number.
+  - **Business time is never computed per row.** `businessTimeBefore(now, minutes)` inverts the
+    clock, so three boundary timestamps are computed once and SQLite counts against them. Running
+    the day-stepping clock per open thread is the one shape of this route that would not scale.
+- **The queue's colours and its "Over 24h" filter run on business time too** (round 15). The
+  Worker sends the two boundaries with `/api/board` (`business_thresholds`), so the browser
+  compares timestamps and never does business-hour arithmetic. The age *label* stays wall-clock:
+  "they wrote 3d ago" is a plain fact about the calendar.
+- **Gap:** `thread.first_response_mins` is never written. The `response` table is the measurement
+  (invariant 4), and nothing reads the column.
 
 ### 7. Ingest never overwrites a status a human set
 - **`blocked`** stays blocked while nothing new arrives. The clock (`awaiting_since`) still runs.
@@ -366,6 +378,17 @@ Never by a shared or rotating login.
 - **Accepted gap:** there is no per-thread authorization. Any signed-in agent can act on any
   thread or to-do. See HANDOFF.
 
+### 8b. Assignment and the unsubscribe link (round 15)
+- **Assignment is config plus an action row.** `POST /api/threads/:id/assign` accepts only an
+  address listed in `AGENTS` (a `[vars]` list, like `OWNERS`), writes `thread.assignee`, and logs
+  an `assigned` action whose actor is the Access identity of whoever did it. There is no agent
+  table and there should not be one; see HANDOFF before adding a fourth person.
+- **The console never unsubscribes for anyone.** Gmail ingest stores the raw `List-Unsubscribe`
+  (and `-Post`) headers; `GET /api/threads/:id` parses them, keeping http(s) and mailto only, and
+  the UI renders a link the agent clicks. We hold `gmail.readonly`, so nothing here can send the
+  mailto as the mailbox, and the RFC 8058 one-click POST is deliberately not made from the Worker.
+  Tests: `tests/unsubscribe.test.mjs`, `tests/panel-actions.test.mjs`.
+
 ### 9. Nothing a user types reaches the DOM unescaped; writes are same-origin JSON (round 10)
 - `public/render.mjs` builds the thread header, history, to-do rows and matrix cells. `esc()`
   escapes `& < > " '`, and `public/queue-sections.mjs` builds the queue rows with it.
@@ -435,12 +458,17 @@ src/lib/thread-state.ts   status / awaiting_since / reopen rules, responseMinute
 src/lib/triage.ts         demotion rules (pure)
 src/lib/clock.ts          business-minutes clock (pure)
 src/lib/quo-signature.ts  Quo webhook verification (Standard Webhooks)
+src/lib/links.ts          deep links into Gmail / Quo, by strict shape; null rather than a broken URL
+src/lib/unsubscribe.ts    List-Unsubscribe parsed for the agent: http(s) and mailto only, never acted on
+src/report.ts             the admin view's four statements: median, buckets, answered, recent
 schema.sql                D1 schema + brand seed
 public/index.html         UI: real API only, paged tiers, freshness badges, 60-second refresh
 public/render.mjs         escaped HTML builders (thread, history, to-dos, matrix cells)
-public/freshness.mjs      last-sync classification, badges, empty/failed queue messages
+public/freshness.mjs      last-sync classification, badges, empty/failed/loading queue messages
+public/report-view.mjs    the admin view's HTML (business durations, buckets, answered list)
 public/paging.mjs         refresh that keeps pages the agent opened
 RUNBOOK.md                the ordered deploy steps, mine vs yours, and what can't be undone
+prove/unsubscribe.mjs     read-only: what List-Unsubscribe really carries on this mailbox
 prove/quo-calls.mjs       read-only: what Quo returns for a call, whether a voicemail and a
                           transcript exist, and how many transcripts a candidate rule would match.
                           Prints field names, codes and counts; never transcript text without --preview.

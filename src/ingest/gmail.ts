@@ -335,8 +335,17 @@ async function syncGmailThread(
     return times.length ? Math.max(...times) : null;
   };
 
+  // Kept as sent, for the agent to act on (round 15). The same header the bulk
+  // signal above reads: 76 of 297 threads in 30 days carry it, and every one of
+  // those offered an https link (prove/unsubscribe.mjs).
+  const listUnsubscribe = headerMap['list-unsubscribe'];
+  const unsubscribe = listUnsubscribe
+    ? JSON.stringify({ h: listUnsubscribe, ...(headerMap['list-unsubscribe-post'] ? { post: headerMap['list-unsubscribe-post'] } : {}) })
+    : null;
+
   await syncThread(env.DB, {
     id: `gmail:${t.id}`,
+    unsubscribe,
     source_id: src.id,
     brand_id: src.brand_id,
     channel: 'email',

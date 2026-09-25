@@ -72,11 +72,18 @@ export function apiRequest(path, { token, cookie, method = 'GET', body } = {}) {
 }
 
 /** Insert a thread row directly (for route tests that don't need ingest). */
-export function insertThread(env, { id, status = 'waiting', assignee = null, awaiting_since = 1789480800, started = 1789480800, blocked_since = undefined }) {
+export function insertThread(env, { id, status = 'waiting', assignee = null, awaiting_since = 1789480800, started = 1789480800, blocked_since = undefined, channel = 'email', brand_id = 'inhouse', triage = undefined, subject = undefined, unsubscribe = undefined }) {
+  const source = channel === 'phone' ? 'quo:PN1' : 'gmail:support@inhousewellness.com';
+  if (channel === 'phone') {
+    env.DB.raw.exec(`INSERT OR IGNORE INTO source (id, brand_id, channel, provider, address)
+                     VALUES ('quo:PN1', 'inhouse', 'phone', 'quo', 'PN1')`);
+  }
   const cols = ['id', 'source_id', 'brand_id', 'channel', 'subject', 'status', 'assignee',
     'conversation_started_at', 'last_inbound_at', 'awaiting_since'];
-  const vals = [id, 'gmail:support@inhousewellness.com', 'inhouse', 'email', `Subject ${id}`, status, assignee,
+  const vals = [id, source, brand_id, channel, subject ?? `Subject ${id}`, status, assignee,
     started, started, awaiting_since];
+  if (triage !== undefined) { cols.push('triage'); vals.push(triage); }
+  if (unsubscribe !== undefined) { cols.push('unsubscribe'); vals.push(unsubscribe); }
   if (blocked_since !== undefined) { cols.push('blocked_since'); vals.push(blocked_since); }
   env.DB.raw.prepare(`INSERT INTO thread (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...vals);
 }

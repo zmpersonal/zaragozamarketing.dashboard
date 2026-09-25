@@ -8,6 +8,8 @@ import { sourceFreshness } from './freshness.mjs';
 
 const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ENTITIES[c]);
+/** The default for the builders below, so a caller can pass a different escaper in a test. */
+const escapeHtml = esc;
 
 /** Subject, customer and preview at the top of the thread panel. */
 export function threadHeaderHtml(t, { brandName }) {
@@ -73,4 +75,63 @@ export function todoListStatusHtml({ loaded, error, shown, total }) {
   if (!total) return '<p class="sub">Nothing on the list. Add the next thing.</p>';
   if (shown < total) return `<p class="sub">Showing ${shown} of ${total}. <button class="more" data-more-todos="1">Show more</button></p>`;
   return '';
+}
+
+/**
+ * Who a thread is assigned to (round 15).
+ *
+ * The people come from config (AGENTS on the Worker), not a table: identity is
+ * the Access JWT and that list. Someone who has left keeps their row in the
+ * history and their name on the threads they hold, so their address is shown
+ * even after it leaves the list — dropping it silently would make a thread look
+ * unassigned when it is not.
+ */
+export function assigneeHtml({ agents = [], assignee = null }, esc = escapeHtml) {
+  const known = agents.map((a) => String(a));
+  if (!known.length && !assignee) {
+    return '<div class="label">Assigned to</div><p class="sub">Nobody is configured to take threads yet (AGENTS).</p>';
+  }
+  const all = assignee && !known.includes(assignee) ? [...known, assignee] : known;
+  const name = (email) => email.split('@')[0].replace(/^./, (c) => c.toUpperCase());
+  const options = [`<option value="">${assignee ? 'Unassigned' : 'Unassigned'}</option>`]
+    .concat(all.map((a) => `<option value="${esc(a)}"${a === assignee ? ' selected' : ''}>${esc(name(a))}</option>`));
+  return (
+    '<div class="label">Assigned to</div>' +
+    `<label class="field"><span>Owner of this thread</span><select id="assignee">${options.join('')}</select></label>` +
+    '<p class="sub" id="assignError" role="alert"></p>'
+  );
+}
+
+/**
+ * What the agent can do with a bulk sender (round 15).
+ *
+ * A link, never an action. The console holds gmail.readonly, so it cannot send
+ * the mailto as support@, and it deliberately does not make the RFC 8058
+ * one-click POST itself: that would be this Worker acting as the mailbox
+ * against a third party, with no way to tell an honest sender from a list
+ * that is only checking whether the address is live. See HANDOFF.
+ */
+export function unsubscribeHtml(u, esc = escapeHtml) {
+  if (!u) return '';
+  // Only a real web link is rendered as one: the header came from the sender.
+  const http = typeof u.url === 'string' && /^https?:\/\//i.test(u.url) ? u.url : null;
+  const mailto = typeof u.mailto === 'string' && /^mailto:/i.test(u.mailto) ? u.mailto : null;
+  if (!http && !mailto) return '';
+  let host = '';
+  try { host = http ? new URL(http).host : ''; } catch { host = ''; }
+  const oneClick = u.one_click ? '<p class="sub">The sender also supports one-click unsubscribe. This console does not send it for you.</p>' : '';
+  if (http) {
+    return (
+      '<div class="label">Unsubscribe</div>' +
+      `<p class="sub">The sender offers a page at ${esc(host)}. It opens in a new tab; nothing is sent from here.</p>` +
+      `<a class="save" href="${esc(http)}" target="_blank" rel="noopener noreferrer">Open the unsubscribe page</a>` +
+      oneClick
+    );
+  }
+  return (
+    '<div class="label">Unsubscribe</div>' +
+    `<p class="sub">Only an email address is offered: <a href="${esc(mailto)}">${esc(mailto.replace(/^mailto:/i, ''))}</a>. ` +
+    'That opens your own mail client — this console cannot send it as support@, it can only read that mailbox.</p>' +
+    oneClick
+  );
 }

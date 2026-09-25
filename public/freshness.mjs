@@ -52,7 +52,11 @@ export function freshnessBadgeHtml(sources, now, esc = escapeHtml) {
  * What to show where the queue would be when it's empty. "Nothing waiting" is
  * only said when the API answered and every source synced recently.
  */
-export function emptyQueueHtml({ sources, now, apiError }, esc = escapeHtml) {
+export function emptyQueueHtml({ sources, now, apiError, loading = false }, esc = escapeHtml) {
+  // Nothing has answered yet: an empty list is not a fact about the world until
+  // the request comes back (round 15, seen on the first paint — the board loads
+  // before the queue, and for a moment the page claimed nobody was waiting).
+  if (loading) return '<div class="empty">Loading…</div>';
   if (apiError) {
     return `<div class="empty error" role="alert">Could not load the queue (${esc(apiError)}). This is not an empty queue; reload, and if it keeps failing, check the Worker.</div>`;
   }

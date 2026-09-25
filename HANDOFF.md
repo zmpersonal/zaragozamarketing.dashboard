@@ -538,6 +538,85 @@ first real deploy, use `wrangler d1 migrations`.
    marketing site's nameservers for one WAF rule is the wrong trade. The limit runs inside the
    Worker instead; see "Rate limiting the public webhook" below.
 
+## Unsubscribe: what is actually possible (round 15)
+
+Measured on the live mailbox with `prove/unsubscribe.mjs` (read-only, 30 days, 297 threads):
+
+| | count |
+|---|---|
+| threads carrying `List-Unsubscribe` | 76 |
+| of those, **mailto only** | **0** |
+| https only | 49 |
+| both | 27 |
+| advertising RFC 8058 one-click (`List-Unsubscribe-Post`) | 63 |
+
+**So every thread that has the header has something an agent can click.** The console shows the
+link, names the host it goes to, and opens it in a new tab.
+
+**What it does not do, and why.**
+- **The mailto cannot be sent from here.** The Google scope is `gmail.readonly`; nothing in this
+  system can send as support@. If a sender ever offers only a mailto, the panel says plainly that
+  the link opens the agent's own mail client, which sends from their address, not the mailbox.
+- **The one-click POST is not made by the Worker**, although 63 of 76 senders would accept it and
+  it needs no Gmail scope at all. One-click is designed to be performed by the mail provider on
+  the recipient's behalf. Doing it from our Worker would be this console acting as the mailbox
+  against a third party, with no way to tell an honest sender from a list checking whether the
+  address is live — and an unsubscribe that quietly confirms the address is worse than none. The
+  panel says the sender supports it and leaves the choice with the agent.
+
+If that trade is ever revisited, the piece to build is a confirm-then-POST action with the
+response code shown to the agent, never a fire-and-forget button.
+
+## The admin report (round 15)
+
+**What it answers:** median first response per channel over a rolling window (30 days by default),
+outstanding work bucketed by business age, how many were answered, and the last 7 days of answers
+with the agent's own note and a link into the real Gmail thread or Quo conversation.
+
+**Median, not mean.** At ~2 real emails a day one 40-hour outlier moves a mean by hours. The median
+is picked inside SQLite with a window function, so a busy month returns two rows per channel
+instead of every measurement.
+
+**Business minutes everywhere**, and never per row: `businessTimeBefore` inverts the clock, three
+boundary timestamps are computed once, and SQLite counts open threads against them. Running the
+day-stepping clock per open thread would have been the expensive mistake here.
+
+**Measured CPU** (workerd under `wrangler dev`, V8 sampling profiler at 1 ms, 250 requests,
+tracing off, against 4,365 fabricated threads / 2,910 responses / 1,455 open — the round-11
+database plus a year of measurements):
+
+| Route | trimmed mean | median | p90 |
+|---|---|---|---|
+| `GET /api/report` (30 days) | **11.0 ms** | 9.6 | 20.3 |
+| `GET /api/report?days=365` | 15.7 ms | 10.1 | 38.5 |
+| `GET /api/board` | 7.5 ms | 8.0 | 15.0 |
+| `GET /api/queue?tier=customer` | 6.1 ms | 5.6 | 15.9 |
+| `GET /api/queue?tier=customer&channel=email` | 5.1 ms | 5.0 | 18.0 |
+| `GET /api/queue` (all tiers) | 13.2 ms | 14.0 | 23.9 |
+
+On Workers Paid the ceiling is 30 s per invocation, so the report is a cost line, not a risk: it is
+about the same as the one-call queue, and it is opened by one person a few times a day. The live
+database is roughly a tenth of this volume. `/api/board` gained ~1 ms for the two business-time
+boundaries it now computes; it is fetched every 60 seconds by every open tab.
+
+**Known limits.** The recent list is capped at 100 rows and has no paging — seven days of answers
+has never approached it. The window is whole days, not calendar months.
+
+## Assignment needs a real source before a fourth person (round 15)
+
+`AGENTS` in `wrangler.toml` is a comma-separated list, like `OWNERS`, and the assignment route
+accepts nothing else. That is the right size for three people and the wrong size for five:
+
+- **The addresses must match the Access policy exactly.** Assigning to an address that cannot sign
+  in hides the thread from that person — it leaves "My queue" for everyone. Julian's is known;
+  **Marianne's and Charlie's are assumptions** (`marianne@`, `charlie@` at the same domain) and
+  must be checked against the Access policy before deploying.
+- Someone who leaves keeps their name on the threads they hold: the picker still shows an assignee
+  who is no longer in the list, rather than silently reading as unassigned.
+- When there is a fourth person, or people come and go, the list should come from the Access
+  group rather than a var. Cloudflare has no API to read a policy's members, so that means either
+  an identity provider group or a small table — at which point the table is worth it.
+
 ## The phone queue: what Quo actually returns (round 14)
 
 Measured on the live InHouse line with `prove/quo-calls.mjs` (read-only, 14 days, 72 calls, 5

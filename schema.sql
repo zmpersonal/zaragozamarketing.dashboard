@@ -91,6 +91,12 @@ CREATE TABLE IF NOT EXISTS thread (
   -- conversation_started_at or awaiting_since, or the filter would launder slow responses.
   first_response_mins INTEGER,
 
+  -- List-Unsubscribe from the first inbound message, as JSON {h, post} (round 15).
+  -- Stored raw so the parsing rules can change without re-ingesting; parsed on
+  -- read by src/lib/unsubscribe.ts. We hold gmail.readonly, so this is a link
+  -- for the agent to click, never an action this console takes.
+  unsubscribe     TEXT,
+
   stage           TEXT,                    -- where this customer is in the process
   raw             TEXT                     -- provider JSON, for debugging
 );

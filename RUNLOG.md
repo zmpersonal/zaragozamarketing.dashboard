@@ -5,6 +5,71 @@ still unproven.
 
 ---
 
+## Round 15 — the interface: separate channels, assignment, and the admin view (2026-09-25, branch `claude/inh-round-15`, cut from `main`)
+
+Nothing was deployed, merged, pushed, or PR'd. Two read-only prove runs against live providers;
+every other run was local, on fabricated data.
+
+### What changed
+1. **A "press 1" rule** (`classifyContent`). On the same 51 real voicemail transcripts it matches
+   46 — every `google_listing` hit and 18 more — and no human leaving a voicemail offers a keypad
+   menu. It is the discriminator to widen, not the Google rule: "I found you on Google" is
+   something a real customer says.
+2. **Channel and brand are filters the database applies** (`?channel=`, `?brand=` on `/api/queue`).
+   They had to be: 60 phone threads filled the first 50-row page, so a client-side "Email" filter
+   would have shown an empty list with 12 emails behind it, and every "N of M" would have been a
+   lie. The nav now reloads instead of re-rendering, and the totals are the totals of what is
+   shown — including under a filter, where round 11 had to hide them.
+3. **Assignment** (`POST /api/threads/:id/assign`), with the three people in `AGENTS`, a `[vars]`
+   list like `OWNERS`. No agent table: the route accepts only a configured address, writes
+   `thread.assignee`, and logs an `assigned` action whose actor is the Access identity of whoever
+   did it, so the report can attribute the work. An assignee who has left the list is still shown.
+4. **Unsubscribe**, surfaced and never acted on. Gmail ingest stores the raw `List-Unsubscribe`
+   headers (new `thread.unsubscribe`), `GET /api/threads/:id` parses them keeping http(s) and
+   mailto only, and the panel renders a link that names the host it opens. What the real mailbox
+   carries, and why the one-click POST is not made from the Worker, is in the reply and in HANDOFF.
+5. **The admin response-time view** (`src/report.ts`, `public/report-view.mjs`), owners only:
+   median first response per channel, outstanding work in four business-age buckets, answered
+   counts, and the last 7 days with each agent's note and a deep link into Gmail or Quo. Four
+   statements, none returning a row per thread: the median is picked in SQLite with a window
+   function, and the buckets are counted against three timestamps `businessTimeBefore` computes
+   once — running the business clock per open thread was the mistake this route was one line away
+   from making.
+6. **The queue's colours and its "Over 24h" filter now run on business time** (`/api/board` sends
+   the boundaries), closing the gap CLAUDE.md invariant 6 had recorded since round 6 as something
+   that had to change before the admin report existed. Age labels stay wall-clock on purpose.
+
+### Failing first, then passing
+- `businessTimeBefore` 4/4 failed (no export), then passed; deep links 4/4 then 4/4; unsubscribe
+  parser 8/8; content rules 1 new failure then 6/6.
+- Channel filters: 6 of 7 failed, then 7/7 — one of the seven failed first because the seed had the
+  email threads *older* than the phone ones, which is the opposite of the live queue; fixed the
+  seed, not the assertion.
+- Assignment 7/7 failed, then 7/7. Report 9/9 failed, then 9/9. Report HTML 7/7. Panel builders
+  8/9 then 9/9.
+- The thread-detail tests (unsubscribe, link) were written and implemented in the same step, so
+  they were verified by reverting the implementation: 0/5 with it out, 5/5 with it back.
+- **Totals: 422 tests, 422 pass, 0 fail.** `check` and `build` clean.
+
+### Found by running it
+`wrangler dev` against 4,365 fabricated threads, signed in as an owner: on the first paint the page
+said **"0 need a reply"** over an empty-queue message while the queue request was still in flight —
+the board answers first. An empty queue is a claim about the world and must not be made before the
+answer arrives, so `emptyQueueHtml` gained a `loading` state and the subtitle now waits for the
+tier. Assignment was exercised end to end in the browser (thread assigned, action logged, panel
+updated), as were the report view and the unsubscribe panel.
+
+### Measured
+`GET /api/report`: **11.0 ms** trimmed mean, 9.6 median, 20.3 p90 (250 requests, 4,365 threads,
+2,910 responses, 1,455 open). A 365-day window is 15.7 ms. For comparison in the same run:
+`/api/queue` all tiers 13.2, one tier 6.1, `/api/board` 7.5. Table and method in HANDOFF.
+
+### Still to run against production (a human; see the reply)
+`ALTER TABLE thread ADD COLUMN unsubscribe TEXT;`, and check the two assumed addresses in `AGENTS`
+against the Access policy.
+
+---
+
 ## Round 14 — the phone queue says what it is (2026-09-25, branch `claude/inh-round-14`, cut from `main`)
 
 Nothing was deployed, merged, pushed, or PR'd. The console is live; every API call this round was a

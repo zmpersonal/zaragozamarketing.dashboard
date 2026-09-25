@@ -10,12 +10,23 @@
 import { rescueThread, responseInsert } from './db/threads.ts';
 import type { Db } from './db/db.ts';
 import { listFailures } from './db/failures.ts';
+import { businessTimeBefore } from './lib/clock.ts';
+import { parseUnsubscribe } from './lib/unsubscribe.ts';
+import { threadLink } from './lib/links.ts';
+import { buildReport, DEFAULT_DAYS, MAX_DAYS } from './report.ts';
 
 export interface Env {
   DB: D1Database;
   ACCESS_AUD: string;      // Cloudflare Access application audience tag
   ACCESS_TEAM: string;     // e.g. "inhouse" for inhouse.cloudflareaccess.com
   OWNERS: string;          // comma-separated emails that get the owner view
+  /**
+   * Comma-separated emails a thread may be assigned to (round 15). Config, not
+   * a table: identity is the Access JWT and this list, and a person who cannot
+   * sign in should not be assignable. Unset means nobody, so the picker is
+   * empty rather than wrong.
+   */
+  AGENTS?: string;
   ASSETS: Fetcher;
 }
 
@@ -68,6 +79,9 @@ async function jsonObject(req: Request): Promise<Record<string, unknown> | null>
     return null;
   }
 }
+
+const emails = (list: string | undefined) =>
+  (list ?? '').split(',').map((s) => s.trim().toLowerCase()).filter((s) => s.includes('@'));
 
 const threadExists = async (env: Env, id: string) =>
   !!(await env.DB.prepare('SELECT 1 AS ok FROM thread WHERE id = ?1').bind(id).first());
@@ -174,7 +188,39 @@ const TIER_SQL: Record<Tier, string> = {
 };
 const TIER_OF_ROW = "CASE WHEN t.triage IN ('bulk','spam') THEN t.triage ELSE 'customer' END";
 const OPEN = "t.status IN ('waiting','blocked')";
-const MINE = 'AND (t.assignee = ?1 OR t.assignee IS NULL)';
+
+/** Channels the schema knows. The nav shows email and phone; chat is real but not wired to a source yet. */
+const CHANNELS = new Set(['email', 'phone', 'chat']);
+const MAX_BRAND_ID = 64;
+
+export interface QueueFilter { channel: string | null; brand: string | null }
+
+/**
+ * Who and what the queue is being asked for, as a WHERE fragment and its binds
+ * (round 15). Channel and brand are applied by the database, not by the
+ * browser: 60 phone threads filled the first 50-row page, so a client-side
+ * "Email" filter would have shown an empty list with 12 emails behind it, and
+ * every "N of M" would have been a lie.
+ */
+function queueWhere(user: User, mine: boolean, f: QueueFilter, extra?: string) {
+  const clauses = [OPEN];
+  const args: unknown[] = [];
+  const next = () => `?${args.length}`;
+  if (mine) { args.push(user.email); clauses.push(`(t.assignee = ${next()} OR t.assignee IS NULL)`); }
+  if (f.channel) { args.push(f.channel); clauses.push(`t.channel = ${next()}`); }
+  if (f.brand) { args.push(f.brand); clauses.push(`t.brand_id = ${next()}`); }
+  if (extra) clauses.push(extra);
+  return { where: clauses.join(' AND '), args };
+}
+
+/** The filters on a queue request, or an error response. */
+function readFilter(url: URL): QueueFilter | Response {
+  const channel = url.searchParams.get('channel');
+  const brand = url.searchParams.get('brand');
+  if (channel !== null && !CHANNELS.has(channel)) return json({ error: `channel must be one of ${[...CHANNELS].join(', ')}` }, 400);
+  if (brand !== null && (brand === '' || brand.length > MAX_BRAND_ID)) return json({ error: 'brand is not a brand id' }, 400);
+  return { channel, brand };
+}
 
 /**
  * What a queue row needs to render, and no more (round 11). Every row returned
@@ -198,11 +244,12 @@ const LIST_COLUMNS = `t.id, t.brand_id, t.channel, t.subject, t.customer_name, t
  *      blocked_since. Blocked is a different kind of waiting, not ageless.
  * Priority orders within each group; the id breaks ties so pages don't overlap.
  */
-async function queuePage(env: Env, user: User, mine: boolean, tier: Tier, offset: number) {
+async function queuePage(env: Env, user: User, mine: boolean, f: QueueFilter, tier: Tier, offset: number) {
+  const { where, args } = queueWhere(user, mine, f, TIER_SQL[tier]);
   const sql = `
     SELECT ${LIST_COLUMNS}
     FROM thread t
-    WHERE ${OPEN} AND ${TIER_SQL[tier]} ${mine ? MINE : ''}
+    WHERE ${where}
     ORDER BY t.status = 'blocked',
              t.priority DESC,
              CASE WHEN t.status = 'blocked' THEN t.blocked_since ELSE t.awaiting_since END IS NULL,
@@ -210,21 +257,22 @@ async function queuePage(env: Env, user: User, mine: boolean, tier: Tier, offset
              t.conversation_started_at ASC,
              t.id ASC
     LIMIT ${QUEUE_PAGE} OFFSET ${offset}`;
-  const stmt = mine ? env.DB.prepare(sql).bind(user.email) : env.DB.prepare(sql);
+  const stmt = args.length ? env.DB.prepare(sql).bind(...args) : env.DB.prepare(sql);
   return (await stmt.all()).results;
 }
 
 /** Open threads per tier, in one statement. */
-async function tierTotals(env: Env, user: User, mine: boolean): Promise<Record<Tier, number>> {
-  const sql = `SELECT ${TIER_OF_ROW} AS tier, COUNT(*) AS n FROM thread t WHERE ${OPEN} ${mine ? MINE : ''} GROUP BY 1`;
-  const stmt = mine ? env.DB.prepare(sql).bind(user.email) : env.DB.prepare(sql);
+async function tierTotals(env: Env, user: User, mine: boolean, f: QueueFilter): Promise<Record<Tier, number>> {
+  const { where, args } = queueWhere(user, mine, f);
+  const sql = `SELECT ${TIER_OF_ROW} AS tier, COUNT(*) AS n FROM thread t WHERE ${where} GROUP BY 1`;
+  const stmt = args.length ? env.DB.prepare(sql).bind(...args) : env.DB.prepare(sql);
   const totals = { customer: 0, bulk: 0, spam: 0 };
   for (const r of (await stmt.all<{ tier: Tier; n: number }>()).results) totals[r.tier] = r.n;
   return totals;
 }
 
-async function queue(env: Env, user: User, mine: boolean) {
-  const [totals, ...pages] = await Promise.all([tierTotals(env, user, mine), ...TIERS.map((tier) => queuePage(env, user, mine, tier, 0))]);
+async function queue(env: Env, user: User, mine: boolean, f: QueueFilter) {
+  const [totals, ...pages] = await Promise.all([tierTotals(env, user, mine, f), ...TIERS.map((tier) => queuePage(env, user, mine, f, tier, 0))]);
   return {
     threads: pages.flat(),
     tiers: Object.fromEntries(TIERS.map((tier, i) => [tier, { shown: pages[i].length, total: totals[tier] }])),
@@ -282,20 +330,42 @@ export default {
       // ingest_failures: items ingest could not sync, including skipped ones, so a stuck record is visible.
       // sources + now: the UI shows each source's last successful sync against the server's clock.
       const sources = (await env.DB.prepare('SELECT id, brand_id, provider, channel, address, last_synced_at FROM source ORDER BY channel, id').all()).results;
-      return json({ user, board: await board(env), ingest_failures: await listFailures(env.DB), sources, now: now() });
+      return json({
+        user, board: await board(env), ingest_failures: await listFailures(env.DB), sources, now: now(),
+        // Who a thread can be assigned to (round 15), and the two business-time
+        // boundaries the queue colours and the "over 24h" filter use, so the
+        // browser never has to do business-hour arithmetic (invariant 6).
+        agents: emails(env.AGENTS),
+        business_thresholds: { h4: businessTimeBefore(now(), 4 * 60), h24: businessTimeBefore(now(), 24 * 60) },
+      });
     }
     if (req.method === 'GET' && path === 'queue') {
+      const filter = readFilter(url);
+      if (filter instanceof Response) return filter;
       const tier = url.searchParams.get('tier');
       const offsetParam = url.searchParams.get('offset');
       if (tier === null) {
         if (offsetParam !== null) return json({ error: 'offset needs a tier' }, 400);
-        return json(await queue(env, user, mine));
+        return json(await queue(env, user, mine, filter));
       }
       if (!(TIERS as string[]).includes(tier)) return json({ error: `tier must be one of ${TIERS.join(', ')}` }, 400);
       if (offsetParam !== null && !/^\d+$/.test(offsetParam)) return json({ error: 'offset must be a whole number' }, 400);
       const offset = Number(offsetParam ?? 0);
-      const [totals, threads] = await Promise.all([tierTotals(env, user, mine), queuePage(env, user, mine, tier as Tier, offset)]);
-      return json({ tier, offset, threads, shown: threads.length, total: totals[tier as Tier], page_size: QUEUE_PAGE });
+      const [totals, threads] = await Promise.all([tierTotals(env, user, mine, filter), queuePage(env, user, mine, filter, tier as Tier, offset)]);
+      return json({ tier, offset, threads, shown: threads.length, total: totals[tier as Tier], page_size: QUEUE_PAGE, channel: filter.channel, brand: filter.brand });
+    }
+    // The admin view. Owners only: it is about how the people answering are doing.
+    if (req.method === 'GET' && path === 'report') {
+      if (user.role !== 'owner') return json({ error: 'Owners only' }, 403);
+      const daysParam = url.searchParams.get('days');
+      if (daysParam !== null && !/^\d+$/.test(daysParam)) return json({ error: 'days must be a whole number' }, 400);
+      const days = Number(daysParam ?? DEFAULT_DAYS);
+      if (days < 1 || days > MAX_DAYS) return json({ error: `days must be between 1 and ${MAX_DAYS}` }, 400);
+      const sources = new Map(
+        (await env.DB.prepare('SELECT id, address FROM source').all<{ id: string; address: string }>()).results
+          .map((r) => [r.id, r.address]),
+      );
+      return json({ user, ...(await buildReport(env.DB, sources, now(), days)) });
     }
     if (req.method === 'GET' && path === 'todos') {
       const offsetParam = url.searchParams.get('offset');
@@ -311,7 +381,20 @@ export default {
       const { results: actions } = await env.DB
         .prepare('SELECT * FROM action WHERE thread_id = ?1 ORDER BY created_at DESC')
         .bind(id).all();
-      return json({ thread, actions });
+      // Parsed here rather than at ingest, so a parsing change reaches threads
+      // already stored. Nothing but http(s) and mailto survives it, and we hold
+      // gmail.readonly: this is a link for the agent, never an action we take.
+      const stored = (thread as { unsubscribe?: string | null }).unsubscribe;
+      let unsubscribe = null;
+      if (stored) {
+        try {
+          const raw = JSON.parse(stored) as { h?: unknown; post?: unknown };
+          unsubscribe = parseUnsubscribe(raw?.h, raw?.post);
+        } catch { unsubscribe = null; }
+      }
+      const source = await env.DB.prepare('SELECT address FROM source WHERE id = ?1')
+        .bind((thread as { source_id?: string }).source_id ?? '').first<{ address: string }>();
+      return json({ thread, actions, unsubscribe, link: threadLink(thread as { id: string }, source?.address ?? null) });
     }
 
     // --- writes: the agent's "input actions and responses" -----
@@ -394,6 +477,31 @@ export default {
       }
       await db.batch(batch);
       return json({ ok: true });
+    }
+
+    // Assignment. No agent table: the people here are config (AGENTS), and who
+    // assigned whom is an action row like every other human touch, so the admin
+    // report can attribute the work.
+    if (req.method === 'POST' && path.startsWith('threads/') && path.endsWith('/assign')) {
+      const id = decodeURIComponent(path.slice('threads/'.length, -'/assign'.length));
+      const raw = await jsonObject(req);
+      if (!raw) return json({ error: 'Body must be a JSON object' }, 400);
+      if (!('assignee' in raw)) return json({ error: 'assignee is required (null to unassign)' }, 400);
+      const value = raw.assignee;
+      if (value !== null && typeof value !== 'string') return json({ error: 'assignee must be an email or null' }, 400);
+      const assignee = value === null ? null : value.trim().toLowerCase();
+      if (assignee !== null && !emails(env.AGENTS).includes(assignee)) {
+        return json({ error: 'assignee must be one of the people in AGENTS' }, 400);
+      }
+      if (!(await threadExists(env, id))) return json({ error: 'No such thread' }, 404);
+      const at = now();
+      const db: Db = env.DB;
+      await db.batch([
+        db.prepare('UPDATE thread SET assignee = ?2 WHERE id = ?1').bind(id, assignee),
+        db.prepare(`INSERT INTO action (thread_id, actor, kind, body, created_at) VALUES (?1, ?2, 'assigned', ?3, ?4)`)
+          .bind(id, user.email, assignee ? `Assigned to ${assignee}.` : 'Unassigned.', at),
+      ]);
+      return json({ ok: true, assignee });
     }
 
     // Rescue a demoted thread into the queue. Triage verdict only: arrival

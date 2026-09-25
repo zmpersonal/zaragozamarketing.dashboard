@@ -24,6 +24,12 @@ database_id = "4f562bdf-560b-4c82-a84e-554aa8c2bcb7"
 ACCESS_TEAM = "dark-frost-948c"
 ACCESS_AUD  = "48d796b48e451af9b69356a275b0b902a2ae9d622f1101c44eec5d3bdbcce2d9"
 OWNERS      = "julian@inhousewellness.com, accounts@inhousewellness.com"
+# Who a thread can be assigned to (round 15). Config, not a table: identity is
+# the Access JWT plus these lists, and a person who cannot sign in should not be
+# assignable. Marianne's and Charlie's addresses here are the obvious ones for
+# this domain and MUST be checked against the Access policy before deploying:
+# assigning to an address that cannot sign in hides the thread from them.
+AGENTS      = "julian@inhousewellness.com, marianne@inhousewellness.com, charlie@inhousewellness.com"
 
 # This Worker has no secrets. QUO_WEBHOOK_SECRET belongs to the hooks Worker (wrangler.hooks.toml).
 #

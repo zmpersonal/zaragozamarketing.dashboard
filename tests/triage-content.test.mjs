@@ -35,6 +35,19 @@ test('a voicemail about Google verification is spam too', () => {
   }
 });
 
+test('"press 1" is a robocall: no human leaving a voicemail says it', () => {
+  // 46 of the same 50 real transcripts say it, and it does not depend on what
+  // the campaign is selling, so it survives the script changing.
+  for (const text of [
+    'Press 1 to speak with a specialist, or press 2 to be removed.',
+    'please press one now to renew your account',
+    'PRESS 1 NOW',
+  ]) {
+    assert.equal(tier(text), 'spam', text);
+    assert.ok(codes(text).includes('press_to_continue'), text);
+  }
+});
+
 test('a real customer who mentions Google in another context is NOT spam', () => {
   for (const text of [
     'Hi, I found your number on Google. My chiller is leaking and I need someone out today.',
@@ -45,6 +58,9 @@ test('a real customer who mentions Google in another context is NOT spam', () =>
     'I need to verify my refund went through. Please call me back.',
     'Your listing price on the website seems wrong, can you check?',
     'Hello, this is Rosa. Calling back about the pump.',
+    // "press" in a human sentence, with no menu behind it.
+    'The lid will not press down flat any more, and one of the clips broke.',
+    'I pressed the reset button one time and nothing happened.',
   ]) {
     assert.equal(tier(text), 'customer', text);
     assert.deepEqual(codes(text), [], text);
@@ -55,7 +71,9 @@ test('the verdict carries its reason to the UI, and never counts as a bulk signa
   const v = classifyContent('About your Google listing, press 1.');
   assert.equal(v.demote, true);
   assert.equal(v.score, 0, 'content spam is the spam tier, never a bulk score');
-  assert.deepEqual(v.signals.map((s) => s.weight), [0]);
+  // Every reason is kept, not just the first: a bad rule has to be visible (invariant 5).
+  assert.deepEqual(v.signals.map((s) => s.code), ['google_listing', 'press_to_continue']);
+  assert.deepEqual(v.signals.map((s) => s.weight), [0, 0]);
   assert.match(v.signals[0].why, /listing/i);
 });
 

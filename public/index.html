@@ -154,6 +154,30 @@
     font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .row .snippet { font-weight: 400; color: var(--steam); }
+
+  /* --- the admin view (round 15) --- */
+  .filters .filter-sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+  .open-link { display: inline-block; margin-top: 8px; font-size: 12.5px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 20px; }
+  .stat { flex: 1 1 160px; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: #fff; }
+  .stat-label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--steam); }
+  .stat-value { font-size: 26px; font-weight: 600; line-height: 1.2; margin: 2px 0; }
+  .stat-sub { font-size: 12px; color: var(--steam); }
+  table.buckets { width: 100%; border-collapse: collapse; margin: 8px 0 20px; font-size: 13.5px; }
+  table.buckets th, table.buckets td { border-bottom: 1px solid var(--line); padding: 7px 10px; text-align: right; }
+  table.buckets thead th { font-size: 12px; color: var(--steam); font-weight: 500; }
+  table.buckets tbody th { text-align: left; font-weight: 500; }
+  table.buckets td.late { color: var(--ember); font-weight: 600; }
+  table.buckets td.total { font-weight: 600; }
+  ul.answered-list { list-style: none; margin: 0; padding: 0; }
+  li.answered { border-bottom: 1px solid var(--line); padding: 10px 0; }
+  .answered-head { display: flex; gap: 8px; align-items: baseline; }
+  .answered-when { font-size: 12.5px; color: var(--steam); width: 52px; flex: none; }
+  .answered-subject { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .answered-who, .answered-said { font-size: 12.5px; color: var(--steam); margin-left: 60px; }
+  .answered-said { color: var(--ink); margin-top: 2px; }
+  .answered-link { display: inline-block; margin: 4px 0 0 60px; font-size: 12.5px; }
+  .quiet { color: var(--steam); font-style: italic; }
   .row .from {
     font-size: 12.5px; color: var(--steam);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -281,6 +305,7 @@
       <nav id="views">
         <button data-view="board" aria-pressed="true">Everything</button>
         <button data-view="mine" aria-pressed="false">My queue</button>
+        <button data-view="report" aria-pressed="false" id="reportView" hidden>Response times</button>
       </nav>
     </div>
     <div>
@@ -312,6 +337,10 @@
       <button data-f="unassigned" aria-pressed="false">Unassigned</button>
       <button data-f="blocked" aria-pressed="false">Blocked</button>
       <button data-f="overdue" aria-pressed="false">Over 24h</button>
+      <span class="filter-sep"></span>
+      <button data-c="" aria-pressed="true">All channels</button>
+      <button data-c="email" aria-pressed="false">Email</button>
+      <button data-c="phone" aria-pressed="false">Phone</button>
     </div>
 
     <div id="queue"></div>
@@ -322,8 +351,9 @@
 
 <script type="module">
 import { SECTIONS, renderSection } from './queue-sections.mjs';
-import { esc, threadHeaderHtml, historyHtml, todoRowHtml, matrixCellHtml, matrixCellView, todoListStatusHtml } from './render.mjs';
+import { esc, threadHeaderHtml, historyHtml, todoRowHtml, matrixCellHtml, matrixCellView, todoListStatusHtml, assigneeHtml, unsubscribeHtml } from './render.mjs';
 import { freshnessBadgeHtml, emptyQueueHtml } from './freshness.mjs';
+import { reportHtml } from './report-view.mjs';
 import { reloadLoadedPages } from './paging.mjs';
 
 // ---------------------------------------------------------------
@@ -343,8 +373,11 @@ const REFRESH_MS = 60_000;
 
 const emptyTier = () => ({ threads: [], total: 0, loaded: false });
 const state = {
-  view: 'board', brand: null, filter: 'all', selected: null, detail: null,
-  user: null, board: [], sources: [], failures: [], serverNow: null, serverNowAt: 0,
+  view: 'board', brand: null, channel: null, filter: 'all', selected: null, detail: null,
+  user: null, agents: [], board: [], sources: [], failures: [], serverNow: null, serverNowAt: 0,
+  // Business-time boundaries from the server (round 15): the browser never does
+  // business-hour arithmetic, it just compares timestamps (invariant 6).
+  thresholds: null, report: null, reportError: null,
   tiers: Object.fromEntries(TIERS.map((t) => [t, emptyTier()])), pageSize: 50,
   todos: [], todosTotal: 0, todosLoaded: false, boardLoaded: false, error: null, loaded: false,
 };
@@ -367,7 +400,6 @@ const NOW = () => Math.floor(Date.now() / 1000);
 const serverNow = () => (state.serverNow ?? NOW()) + Math.floor((Date.now() - state.serverNowAt) / 1000);
 const ageHours = (t) => (NOW() - t) / 3600;
 // TODO: still wall-clock hours; must become business minutes (CLAUDE.md invariant 6).
-const waitHours = (t) => (t.awaiting_since == null ? null : ageHours(t.awaiting_since));
 const isBlocked = (t) => t.status === 'blocked';
 const since = (t) => (isBlocked(t) ? t.blocked_since : t.awaiting_since);
 const ageText = (t) => isBlocked(t)
@@ -381,24 +413,41 @@ function ageLabel(t) {
   return Math.round(hrs / 24) + 'd';
 }
 
-/** Fresh reads cold, stale reads hot. 24h is the line. */
-function heatColor(hrs) {
-  if (hrs < 4) return 'var(--plunge)';
-  if (hrs < 24) return 'var(--brass)';
+/**
+ * Fresh reads cold, stale reads hot — in BUSINESS hours (invariant 6). The
+ * server sends the two boundaries with the board; an email that arrived at 17:05
+ * on Friday is not four hours old on Saturday morning, and colouring it red
+ * would have the agent chasing a clock nobody is measured against.
+ * The age *label* stays wall-clock: "they wrote 3d ago" is a plain fact.
+ */
+function heatColor(awaitingSince) {
+  const th = state.thresholds;
+  if (awaitingSince == null) return 'var(--steam)';
+  if (!th) return 'var(--steam)';
+  if (awaitingSince > th.h4) return 'var(--plunge)';
+  if (awaitingSince > th.h24) return 'var(--brass)';
   return 'var(--ember)';
 }
+/** Past 24 business hours, from the server's boundary. */
+const overdue = (t) => state.thresholds != null && since(t) != null && since(t) <= state.thresholds.h24;
 const brandName = (id) => BRANDS.find((b) => b.id === id)?.name ?? '—';
 
 // --- loading ---------------------------------------------------------------------
 
 const mineParam = () => (state.view === 'mine' ? '&mine=1' : '');
+/** Channel and brand are applied by the database, so "N of M" is the truth (round 15). */
+const scopeParams = () => (state.channel ? `&channel=${state.channel}` : '') + (state.brand ? `&brand=${encodeURIComponent(state.brand)}` : '');
 
 async function loadBoard() {
   const b = await api('board');
-  Object.assign(state, { user: b.user, board: b.board, failures: b.ingest_failures, sources: b.sources, serverNow: b.now, serverNowAt: Date.now(), boardLoaded: true });
+  Object.assign(state, { user: b.user, agents: b.agents ?? [], board: b.board, failures: b.ingest_failures, sources: b.sources, serverNow: b.now, serverNowAt: Date.now(), thresholds: b.business_thresholds ?? null, boardLoaded: true });
+}
+async function loadReport() {
+  try { state.report = await api('report'); state.reportError = null; }
+  catch (err) { state.report = null; state.reportError = err.message; }
 }
 async function loadTier(tier, offset = 0) {
-  const page = await api(`queue?tier=${tier}&offset=${offset}${mineParam()}`);
+  const page = await api(`queue?tier=${tier}&offset=${offset}${mineParam()}${scopeParams()}`);
   const t = state.tiers[tier];
   t.threads = offset ? [...t.threads, ...page.threads] : page.threads;
   t.total = page.total;
@@ -414,7 +463,7 @@ async function loadTodos(more = false) {
 /** Refresh a tier without collapsing pages the agent opened. */
 async function reloadTier(tier) {
   const t = state.tiers[tier];
-  const r = await reloadLoadedPages(async (offset) => api(`queue?tier=${tier}&offset=${offset}${mineParam()}`), t.threads.length, state.pageSize);
+  const r = await reloadLoadedPages(async (offset) => api(`queue?tier=${tier}&offset=${offset}${mineParam()}${scopeParams()}`), t.threads.length, state.pageSize);
   Object.assign(t, { threads: r.threads, total: r.total, loaded: true });
 }
 async function loadDetail(id) {
@@ -447,7 +496,7 @@ function renderRail() {
     const b = document.createElement('button');
     b.textContent = name;
     b.setAttribute('aria-pressed', String(state.brand === id));
-    b.onclick = () => { state.brand = id; render(); };
+    b.onclick = () => { state.brand = id; load(loadQueue); };
     nav.append(b);
   };
   mk(null, 'All brands');
@@ -473,8 +522,8 @@ function renderMatrix() {
       const td = document.createElement('td');
       const btn = document.createElement('button');
       btn.className = 'cell' + (count ? '' : ' quiet');
-      btn.innerHTML = matrixCellHtml({ count: view.count, oldest: view.note, fill: Math.min(100, (hrs / 48) * 100), color: heatColor(hrs), tone: view.tone });
-      btn.onclick = () => { state.brand = brand.id; state.filter = 'all'; render(); };
+      btn.innerHTML = matrixCellHtml({ count: view.count, oldest: view.note, fill: Math.min(100, (hrs / 48) * 100), color: heatColor(oldest), tone: view.tone });
+      btn.onclick = () => { state.brand = brand.id; state.channel = channel === 'chat' ? null : channel; state.filter = 'all'; load(loadQueue); };
       btn.setAttribute('aria-label', view.count + ' waiting on ' + channel + ' for ' + brand.name + ', ' + view.note);
       td.append(btn);
       tr.append(td);
@@ -483,13 +532,14 @@ function renderMatrix() {
   }
 }
 
-const filtered = () => state.brand !== null || state.filter !== 'all';
+// Brand and channel are applied by the database, so they do not make the totals
+// a lie; only these three narrow what is already on the page.
+const filtered = () => state.filter !== 'all';
 function visible(threads) {
   let rows = threads;
-  if (state.brand) rows = rows.filter((t) => t.brand_id === state.brand);
   if (state.filter === 'unassigned') rows = rows.filter((t) => !t.assignee);
   if (state.filter === 'blocked') rows = rows.filter((t) => t.status === 'blocked');
-  if (state.filter === 'overdue') rows = rows.filter((t) => waitHours(t) > 24);
+  if (state.filter === 'overdue') rows = rows.filter(overdue);
   return rows;
 }
 
@@ -497,9 +547,11 @@ function renderQueue() {
   const wrap = document.getElementById('queue');
   const customer = state.tiers.customer;
   document.getElementById('title').textContent = state.view === 'mine' ? 'My queue' : 'Waiting on us';
-  const over = customer.threads.filter((t) => waitHours(t) > 24).length;
+  const over = customer.threads.filter(overdue).length;
   const overText = over ? `, ${over}${customer.threads.length < customer.total && over === customer.threads.length ? '+' : ''} past 24 hours` : '';
-  document.getElementById('subtitle').textContent = state.loaded && !state.error
+  // The count is only printed once the queue itself has answered; the board
+  // arrives first and used to paint "0 need a reply" over a full queue.
+  document.getElementById('subtitle').textContent = customer.loaded && !state.error
     ? `${customer.total} need a reply${state.view === 'mine' ? ' (yours and unassigned)' : ' across all brands'}${overText}`
     : '';
   document.getElementById('synced').innerHTML = freshnessBadgeHtml(state.sources, serverNow(), esc);
@@ -522,11 +574,11 @@ function renderQueue() {
     threads: visible(state.tiers[s.tier].threads),
     opts: {
       ageText, brandName, selected: state.selected,
-      color: (t) => heatColor(since(t) == null ? 0 : ageHours(since(t))),
+      color: (t) => heatColor(since(t)),
       pageSize: state.pageSize,
       // "N of M" and the next-page control only mean something without a client-side filter.
       total: filtered() ? undefined : state.tiers[s.tier].total,
-      emptyHtml: s.tier === 'customer' && !filtered() ? emptyQueueHtml({ sources: state.sources, now: serverNow(), apiError: state.error }, esc) : null,
+      emptyHtml: s.tier === 'customer' && !filtered() ? emptyQueueHtml({ sources: state.sources, now: serverNow(), apiError: state.error, loading: !state.tiers[s.tier].loaded }, esc) : null,
     },
   }));
   wrap.innerHTML = sections.map((section) => renderSection(section, esc, section.opts)).join('');
@@ -548,6 +600,45 @@ function threadDetail() {
   const frag = document.createElement('div');
   frag.className = 'section';
   frag.innerHTML = threadHeaderHtml(t, { brandName });
+  // A link into the mailbox or the Quo inbox: the console shows what happened,
+  // the provider is still where the conversation lives.
+  const link = state.detail?.thread?.id === t.id ? state.detail.link : null;
+  if (link) {
+    const a = document.createElement('a');
+    a.className = 'open-link';
+    a.href = link;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = t.channel === 'phone' ? 'Open the conversation in Quo' : 'Open the thread in Gmail';
+    frag.append(a);
+  }
+
+  // Assignment, and the unsubscribe the sender offered, both from the detail fetch.
+  const assign = document.createElement('div');
+  assign.className = 'section';
+  assign.innerHTML = assigneeHtml({ agents: state.agents, assignee: t.assignee ?? null }, esc);
+  const picker = assign.querySelector('#assignee');
+  if (picker) {
+    picker.onchange = async () => {
+      const value = picker.value || null;
+      picker.disabled = true;
+      try {
+        await api(`threads/${encodeURIComponent(t.id)}/assign`, { method: 'POST', body: JSON.stringify({ assignee: value }) });
+      } catch (err) {
+        assign.querySelector('#assignError').textContent = 'Not saved: ' + err.message;
+        picker.disabled = false;
+        return;
+      }
+      await load(reloadQueue, () => loadDetail(t.id));
+    };
+  }
+
+  const unsub = document.createElement('div');
+  const hasUnsub = state.detail?.thread?.id === t.id && !!state.detail.unsubscribe;
+  if (hasUnsub) {
+    unsub.className = 'section';
+    unsub.innerHTML = unsubscribeHtml(state.detail.unsubscribe, esc);
+  }
 
   const form = document.createElement('div');
   form.className = 'section';
@@ -610,7 +701,8 @@ function threadDetail() {
   const log = state.detail?.thread?.id === t.id ? state.detail.actions : [];
   history.innerHTML = historyHtml(log, { ageLabel });
 
-  box.append(frag, form, history);
+  box.append(frag, assign, form, history);
+  if (hasUnsub) box.append(unsub);
   return box;
 }
 
@@ -653,15 +745,46 @@ function todoList() {
   return wrap;
 }
 
+function renderReport() {
+  const wrap = document.getElementById('queue');
+  document.getElementById('title').textContent = 'Response times';
+  document.getElementById('subtitle').textContent = state.report
+    ? `Median first response, business hours only, last ${state.report.days} days`
+    : '';
+  if (state.reportError) {
+    wrap.innerHTML = '';
+    wrap.append(errorBanner('Could not load the report: ' + state.reportError));
+    return;
+  }
+  wrap.innerHTML = state.report ? reportHtml(state.report, esc) : '<div class="empty">Loading…</div>';
+}
+
+/** An error the page builds itself, so no string from the server becomes markup. */
+function errorBanner(text) {
+  const div = document.createElement('div');
+  div.className = 'empty error';
+  div.setAttribute('role', 'alert');
+  div.textContent = text;
+  return div;
+}
+
 function render() {
   renderRail();
-  renderMatrix();
-  renderQueue();
+  const isReport = state.view === 'report';
+  document.querySelector('.matrix').hidden = isReport;
+  document.getElementById('filters').hidden = isReport;
+  if (isReport) renderReport();
+  else renderQueue();
+  if (!isReport) renderMatrix();
   renderPanel();
+  const reportBtn = document.getElementById('reportView');
+  reportBtn.hidden = state.user?.role !== 'owner';
   for (const b of document.querySelectorAll('#views button'))
     b.setAttribute('aria-pressed', String(b.dataset.view === state.view));
-  for (const b of document.querySelectorAll('#filters button'))
-    b.setAttribute('aria-pressed', String(b.dataset.f === state.filter));
+  for (const b of document.querySelectorAll('#filters button')) {
+    if (b.dataset.c !== undefined) b.setAttribute('aria-pressed', String((b.dataset.c || null) === state.channel));
+    else b.setAttribute('aria-pressed', String(b.dataset.f === state.filter));
+  }
 }
 
 // --- events ----------------------------------------------------------------------------
@@ -688,11 +811,17 @@ document.getElementById('views').onclick = async (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   state.view = b.dataset.view;
-  await load(loadQueue);
+  await load(state.view === 'report' ? loadReport : loadQueue);
 };
 document.getElementById('filters').onclick = (e) => {
   const b = e.target.closest('button');
   if (!b) return;
+  // Channel is the server's filter, so it reloads; the rest narrow what is here.
+  if (b.dataset.c !== undefined) {
+    state.channel = b.dataset.c || null;
+    load(loadQueue);
+    return;
+  }
   state.filter = b.dataset.f;
   render();
 };
@@ -702,7 +831,10 @@ async function boot() {
   if (state.user?.role === 'agent') state.view = 'mine';
   await load(loadQueue);
   // Keep ages and sync freshness current; a stopped ingest shows up without a reload.
-  setInterval(() => load(loadBoard, reloadQueue, loadTodos), REFRESH_MS);
+  setInterval(() => {
+    if (state.view === 'report') load(loadBoard, loadReport);
+    else load(loadBoard, reloadQueue, loadTodos);
+  }, REFRESH_MS);
 }
 boot();
 </script>

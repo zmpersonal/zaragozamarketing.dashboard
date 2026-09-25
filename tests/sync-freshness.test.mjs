@@ -15,6 +15,7 @@ import { sourceFreshness, overallFreshness, freshnessBadgeHtml, emptyQueueHtml, 
 import { esc } from '../public/render.mjs';
 
 const NOW = 1789480800;
+const email = (last) => ({ id: 'gmail:support@inhousewellness.com', brand_id: 'inhouse', provider: 'gmail', channel: 'email', address: 'support@inhousewellness.com', last_synced_at: last });
 const H = 3600;
 const gmail = (last) => ({ id: 'gmail:support@inhousewellness.com', provider: 'gmail', channel: 'email', address: 'support@inhousewellness.com', last_synced_at: last });
 const quo = (last) => ({ id: 'quo:PN1', provider: 'quo', channel: 'phone', address: 'PN1', last_synced_at: last });
@@ -124,4 +125,25 @@ test('a run that fails for a source does not touch its last successful sync; a g
 test('the error and badge renderers escape even when the caller forgets to pass esc', () => {
   assert.ok(!emptyQueueHtml({ sources: [], now: NOW, apiError: '<img src=x onerror=1>' }).includes('<img'));
   assert.ok(!freshnessBadgeHtml([{ ...gmail(null), address: '<b>x</b>' }], NOW).includes('<b>'));
+});
+
+// Round 15, found by running it: the board loads before the queue does, so for
+// one paint the page said "0 need a reply" over an empty-queue message while
+// the first page of threads was still in flight. An empty queue is a claim
+// about the world and must not be made before the answer arrives.
+test('a queue that has not loaded yet says so, and never looks empty', () => {
+  const html = emptyQueueHtml({ sources: [email(NOW - 60)], now: NOW, apiError: null, loading: true }, esc);
+  assert.match(html, /Loading/i);
+  assert.doesNotMatch(html, /Nothing waiting/i);
+  assert.doesNotMatch(html, /out of date/i);
+});
+
+test('loading beats every other state, including a stale source', () => {
+  const html = emptyQueueHtml({ sources: [email(NOW - 40 * 3600)], now: NOW, apiError: null, loading: true }, esc);
+  assert.match(html, /Loading/i);
+});
+
+test('once loaded, nothing changes about what it says', () => {
+  const fresh = emptyQueueHtml({ sources: [email(NOW - 60)], now: NOW, apiError: null, loading: false }, esc);
+  assert.match(fresh, /Nothing waiting/);
 });

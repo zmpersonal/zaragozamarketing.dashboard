@@ -167,6 +167,15 @@ const CONTENT_RULES: { code: string; why: string; test: RegExp }[] = [
     test: /\bgoogle\b[^.?!]{0,30}\blisting|\blisting\b[^.?!]{0,30}\bgoogle\b/i,
   },
   {
+    // 46 of the same 50 transcripts. A person leaving a voicemail never offers a
+    // keypad menu, and this survives the campaign changing what it sells, which
+    // widening the Google rule would not: "I found you on Google" is something a
+    // real customer says.
+    code: 'press_to_continue',
+    why: 'voicemail offers a keypad menu ("press 1")',
+    test: /\bpress\s+(1|one|2|two)\b/i,
+  },
+  {
     code: 'google_verification',
     why: 'voicemail or text about Google verification',
     test: /\bgoogle\b[^.?!]{0,20}\bverificat|\bverificat\w*\b[^.?!]{0,20}\bgoogle\b/i,

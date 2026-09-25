@@ -87,6 +87,47 @@ export function businessMinutes(from: number, to: number): number {
   return Math.round(total);
 }
 
+/**
+ * The instant that is `minutes` business minutes before `to` — the inverse of
+ * businessMinutes (round 15).
+ *
+ * The admin report buckets open threads by business age. Doing that per thread
+ * would run the day-stepping loop once per row; instead the boundaries are
+ * computed once here and SQLite compares awaiting_since against them.
+ *
+ * Steps backwards one local calendar date at a time, for the same reason
+ * businessMinutes steps forwards: a local day is 23, 24 or 25 hours long and
+ * each one's window has to be resolved from its own wall times.
+ */
+export function businessTimeBefore(to: number, minutes: number): number {
+  if (minutes <= 0) return to;
+  let left = minutes;
+
+  const start = parts(to);
+  let date = new Date(Date.UTC(start.year, start.month - 1, start.day));
+
+  // A year of business days is ~260; the guard is a long way past any bucket
+  // this report uses, and stops a bad argument spinning the isolate.
+  for (let steps = 0; steps < 800; steps++) {
+    const y = date.getUTCFullYear();
+    const m = date.getUTCMonth() + 1;
+    const d = date.getUTCDate();
+
+    if (WORKDAYS.has(date.getUTCDay())) {
+      const open = localToUnix(y, m, d, OPEN_MIN);
+      const close = Math.min(to, localToUnix(y, m, d, CLOSE_MIN));
+      const available = (close - open) / 60;
+      if (available > 0) {
+        if (available >= left) return Math.round(close - left * 60);
+        left -= available;
+      }
+    }
+    date = new Date(Date.UTC(y, m - 1, d - 1));
+  }
+  // Out of range: the oldest instant the walk reached.
+  return localToUnix(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), OPEN_MIN);
+}
+
 /** True when the support desk is open right now. */
 export function isOpen(unixSec: number = Math.floor(Date.now() / 1000)): boolean {
   const p = parts(unixSec);

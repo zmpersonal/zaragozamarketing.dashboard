@@ -116,6 +116,8 @@ produces a second measurement.
     `src/lib/triage.ts`. A 404 means it rang out, which is normal, not a failure.
   - A phone thread is titled by its newest activity: **Voicemail**, **Missed call**, **Text**,
     **Call** (answered) or **Outgoing call**. Everything used to be "Call".
+  - A voicemail that offers a keypad menu ("press 1") is spam: 46 of 51 real transcripts say it,
+    and nobody leaving a voicemail for a person does.
   - Call transcripts (for answered calls) need Quo's business plan and are not available here; the
     line has no call recordings either. Voicemail transcripts are unaffected.
   - A conversation that fails 3 times in a row is skipped, so it can't hold the cursor back
@@ -139,6 +141,18 @@ produces a second measurement.
     client IP, then 429. The endpoint is public, and on a paid plan unauthenticated requests are
     billed rather than capped. It is a cost guard, not a trust boundary — Cloudflare's WAF can't
     do it here, because rate-limiting rules run on zones and workers.dev is not in one.
+
+## What the console does
+
+- **The queue**, three tiers deep, paged per tier, filtered by brand and channel **in the
+  database** so every "N of M" is exact. Email and phone can be read apart; 52 missed calls used
+  to bury a two-a-day email queue.
+- **The detail panel**: log what you did, assign the thread to someone, open the real Gmail thread
+  or Quo conversation, and — on a bulk sender — the unsubscribe link that sender offered.
+- **Response times**, for owners: median first response per channel, what is still waiting
+  bucketed by how long, and the last week of answers with the agent's note and a link to read the
+  thread. Business hours only (Mon–Fri 08:00–17:00 Central), median rather than mean, bulk and
+  spam excluded. See HANDOFF for what it costs to serve.
 
 ## Setup
 
