@@ -182,9 +182,13 @@ const MINE = 'AND (t.assignee = ?1 OR t.assignee IS NULL)';
  * largest share of /api/queue's CPU; preview and notes load with the thread
  * (GET /api/threads/:id) when it is opened.
  */
+// Slim rows (round 11): only what the list renders. The preview joined them in
+// round 14, truncated in SQL — a phone row's subject is just "Voicemail", and
+// the transcript is what tells one row from another. Notes and the full preview
+// still come with GET /api/threads/:id.
 const LIST_COLUMNS = `t.id, t.brand_id, t.channel, t.subject, t.customer_name, t.customer_handle,
            t.status, t.blocked_on, t.assignee, t.conversation_started_at, t.awaiting_since,
-           t.blocked_since, t.is_automated, t.triage, t.triage_signals`;
+           t.blocked_since, t.is_automated, t.triage, t.triage_signals, substr(t.preview, 1, 120) AS preview`;
 
 /**
  * One page of one tier, in two groups:

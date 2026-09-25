@@ -538,6 +538,71 @@ first real deploy, use `wrangler d1 migrations`.
    marketing site's nameservers for one WAF rule is the wrong trade. The limit runs inside the
    Worker instead; see "Rate limiting the public webhook" below.
 
+## The phone queue: what Quo actually returns (round 14)
+
+Measured on the live InHouse line with `prove/quo-calls.mjs` (read-only, 14 days, 72 calls, 5
+texts). The console had 52 phone threads, every one titled "Call", all unassigned.
+
+**Calls.** Fields: `answeredAt, answeredBy, initiatedBy, direction, status, completedAt, createdAt,
+callRoute, duration, forwardedFrom, forwardedTo, aiHandled, id, phoneNumberId, participants,
+updatedAt, userId`. No voicemail field, no transcript field.
+
+| | count |
+|---|---|
+| incoming, `no-answer`, answeredAt null, 0s | 61 |
+| incoming, `completed`, **answeredAt null**, 0s | 3 |
+| incoming answered | 2 |
+| outgoing answered | 6 |
+| outgoing unanswered | 0 |
+
+`status = 'completed'` does **not** mean answered. `answeredAt` is the only field that does.
+
+**Voicemail is a second request.** `GET /v1/call-voicemails/{callId}` returns
+`{duration, id, transcript, recordingUrl, status}`. 50 of the 64 unanswered incoming calls had one,
+**every one with a transcript**; the other 14 answered 404 "Call voicemail not found", which is the
+normal answer for a call that rang out, not an error.
+
+**Call transcripts are not available on this plan.** `GET /v1/call-transcripts/{id}` answered 404
+on every probe, including 12-minute answered calls; the docs say transcripts are "only available on
+business and scale plans". `GET /v1/call-recordings/{id}` answers 200 with an empty array, so there
+is no audio stored to transcribe. Voicemail transcripts are unaffected — they come with the
+voicemail.
+
+**What those 52 threads were.** 64 conversations with activity in the window: 62 call-only, 1
+text-only, 1 both. 58 resolved to `waiting`, 6 to `answered`. So the queue was not mislabelling
+answered calls — `answeredAt` was already mapped correctly. The queue was **a robocall campaign**:
+50 voicemails from 48 distinct numbers, 46 of them mentioning Google, 46 saying "press 1".
+
+**What the rules catch** (counts over those 50 transcripts):
+
+| rule | matches |
+|---|---|
+| `google_listing` as shipped (google ↔ listing within a sentence) | 28 |
+| literal phrase "google listing" | 28 |
+| `google_verification` as shipped (the noun, within a sentence) | 0 |
+| loosened to "verify" | 18, all already caught by `google_listing` |
+| google + listing anywhere in the transcript | 32 |
+| mentions Google at all | 46 |
+
+So the two rules take 28 of 50 voicemails out of Needs reply. **18 more mention Google but not near
+"listing"**; widening to "google anywhere in a voicemail" would catch 46 and is the owner's call.
+
+**Known edge.** A customer who says both "Google" and "listing" in one sentence ("I found your
+listing on Google…") is demoted to spam. The spam tier is always visible with its reason and can be
+rescued, and the rule is not loosened to protect this case because it would lose most of the
+campaign. Worth watching in the spam section.
+
+**Voicemail arrives late.** The webhook (`call.missed`) has no voicemail — Quo is still processing
+it — and the hooks Worker holds no API key by design. So a thread appears as "Missed call" in
+seconds and becomes "Voicemail" on the next hourly poll. That is the one place where phone is not
+real-time.
+
+**Existing rows do not fix themselves.** Polling only re-reads conversations with activity since
+the cursor, so the 52 threads already in the queue keep their old title until the cursor is reset
+once (RUNLOG round 14 has the command). `syncThread` now updates `subject`, which it never did
+before, so a re-scan corrects them in place; `conversation_started_at` and `awaiting_since` are
+untouched, and response rows are deduplicated, so a re-scan cannot launder a slow reply.
+
 ## Rate limiting the public webhook (round 13)
 
 `/hooks/quo` is public and unauthenticated by design, and verifying a delivery means reading the

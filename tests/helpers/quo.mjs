@@ -25,7 +25,7 @@ export function makeQuoEnv() {
  * Add activity with text()/call(); each keeps the conversation's lastActivity fields current.
  */
 export function makeQuoAccount() {
-  const account = { conversations: {}, messages: {}, calls: {}, requests: [], fail: new Set() };
+  const account = { conversations: {}, messages: {}, calls: {}, voicemails: {}, requests: [], fail: new Set() };
 
   const touch = (cn, at, direction, type) => {
     const c = account.conversations[cn];
@@ -39,23 +39,33 @@ export function makeQuoAccount() {
     account.messages[cn] = [];
     account.calls[cn] = [];
   };
-  account.text = (cn, at, direction, { status = direction === 'incoming' ? 'received' : 'delivered' } = {}) => {
+  account.text = (cn, at, direction, { status = direction === 'incoming' ? 'received' : 'delivered', text } = {}) => {
     account.messages[cn].push({
       id: `AC-m-${cn}-${at}`, conversationId: cn, phoneNumberId: PHONE, direction, status,
       from: direction === 'incoming' ? account.conversations[cn].participants[0] : '+15125550100',
       to: [direction === 'incoming' ? '+15125550100' : account.conversations[cn].participants[0]],
-      text: `${direction} at ${at}`, createdAt: iso(at), updatedAt: iso(at),
+      text: text ?? `${direction} at ${at}`, createdAt: iso(at), updatedAt: iso(at),
     });
     touch(cn, at, direction, 'message');
   };
-  account.call = (cn, at, direction, { answeredAfter = null } = {}) => {
+  // Statuses are the ones the real API returns (round 14, measured on the live
+  // line): 'no-answer' for a call nobody picked up, 'completed' otherwise —
+  // including 3 of 72 incoming calls that were 'completed' with answeredAt null
+  // and duration 0. answeredAt is what actually says a human answered.
+  account.call = (cn, at, direction, { answeredAfter = null, status, voicemail = null } = {}) => {
+    const id = `AC-c-${cn}-${at}`;
     account.calls[cn].push({
-      id: `AC-c-${cn}-${at}`, phoneNumberId: PHONE, direction, participants: account.conversations[cn].participants,
-      status: answeredAfter === null ? (direction === 'incoming' ? 'missed' : 'no-answer') : 'completed',
+      id, phoneNumberId: PHONE, direction, participants: account.conversations[cn].participants,
+      status: status ?? (answeredAfter === null ? 'no-answer' : 'completed'),
       createdAt: iso(at), answeredAt: answeredAfter === null ? null : iso(at + answeredAfter),
       completedAt: iso(at + (answeredAfter ?? 0) + 60), duration: answeredAfter === null ? 0 : 60,
+      answeredBy: null, initiatedBy: null, callRoute: 'phone-number', forwardedFrom: null, forwardedTo: null,
+      aiHandled: null, userId: 'US1', updatedAt: iso(at + 60),
     });
+    // GET /v1/call-voicemails/{callId}: {duration, id, transcript, recordingUrl, status}.
+    if (voicemail) account.voicemails[id] = { duration: 14, id: `VM-${id}`, recordingUrl: 'https://example.invalid/vm.mp3', status: 'completed', ...voicemail };
     touch(cn, at, direction, 'call');
+    return id;
   };
   return account;
 }
@@ -112,6 +122,16 @@ export async function withQuo(account, fn, { pageSize = 100 } = {}) {
       if (account.fail.has(cn)) return new Response('boom', { status: 500 });
       const store = url.pathname === '/v1/messages' ? account.messages : account.calls;
       return ok(paged(after(store[cn] ?? [], q.get('createdAfter')), q, pageSize));
+    }
+
+    // GET /v1/call-voicemails/{callId}. 404 is the normal answer for a call
+    // that rang out, and the docs give no plan restriction (unlike transcripts).
+    if (url.pathname.startsWith('/v1/call-voicemails/')) {
+      const callId = url.pathname.slice('/v1/call-voicemails/'.length);
+      if (account.failVoicemail) return new Response('boom', { status: 500 });
+      const vm = account.voicemails[callId];
+      if (!vm) return new Response(JSON.stringify({ message: 'Call voicemail not found' }), { status: 404 });
+      return ok({ data: vm });
     }
 
     // What the pre-round-3 ingest called (not a documented v1 path).

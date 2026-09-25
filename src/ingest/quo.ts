@@ -31,6 +31,7 @@
  */
 import type { Db, IngestEnv } from '../db/db.ts';
 import type { Observed } from '../lib/thread-state.ts';
+import { classifyContent } from '../lib/triage.ts';
 import { syncThread } from '../db/threads.ts';
 import { clearFailure, recordFailure, SKIP_AFTER_FAILURES } from '../db/failures.ts';
 import { Budget } from '../lib/budget.ts';
@@ -49,6 +50,8 @@ export const QUO_LIMITS = {
   listPagesPerRun: 5,
   /** pages of messages, and of calls, one conversation may read (100 each); more is recorded as a failure */
   pagesPerConversation: 10,
+  /** voicemail lookups (one fetch each) one conversation may make in a run */
+  voicemailsPerConversation: 10,
   /** cap on conversations queued in the cursor */
   maxPending: 2000,
   /** per run, all sources: fetches + D1 statements */
@@ -63,6 +66,10 @@ export const QUO_LIMITS = {
  * reopen/unblock log, clearFailure, and recordFailure's 2 if it fails. Each completed wait adds one response row.
  */
 const CONVERSATION_QUERIES = 7;
+// Voicemail lookups are deliberately NOT reserved here: they are enrichment on
+// top of a call we have already recorded, so they are spent only out of what is
+// left (readConversation's `budget`). Reserving them would halve how many
+// conversations fit a tight run for something that is never half a write.
 const CONVERSATION_FETCHES = 2 * QUO_LIMITS.pagesPerConversation;
 /** First poll for a source reads this far back. Matches Gmail's 30-day window. */
 const BACKFILL_SECONDS = 30 * 86400;
@@ -85,7 +92,23 @@ export interface QuoConversation {
   lastActivityAt?: string | null;
 }
 export interface QuoMessage { direction: 'incoming' | 'outgoing'; status?: string; createdAt: string; text?: string }
-export interface QuoCall { direction: 'incoming' | 'outgoing'; createdAt: string; answeredAt?: string | null }
+/**
+ * A call as /v1/calls returns it (round 14, checked against the live line):
+ * answeredAt is set only when a human picked up. `status` is 'no-answer' or
+ * 'completed', and 'completed' does NOT mean answered — 3 of 72 incoming calls
+ * were 'completed' with answeredAt null and duration 0. `voicemail` is not part
+ * of the call: it is fetched per call from /v1/call-voicemails/{callId}.
+ */
+export interface QuoCall {
+  id?: string;
+  direction: 'incoming' | 'outgoing';
+  createdAt: string;
+  answeredAt?: string | null;
+  status?: string;
+  duration?: number | null;
+  voicemail?: QuoVoicemail | null;
+}
+export interface QuoVoicemail { transcript?: string | null; duration?: number | null; status?: string }
 
 type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -114,7 +137,12 @@ async function all<T>(env: QuoAuth, path: string, params: [string, string][], op
   return out;
 }
 
-interface ReadOptions { fetch?: Fetch; maxPages?: number }
+interface ReadOptions {
+  fetch?: Fetch;
+  maxPages?: number;
+  /** What is left of the run. Voicemail lookups stop when they no longer fit. */
+  budget?: { canAfford(fetches: number, queries: number): boolean };
+}
 
 export const listPhoneNumbers = (env: QuoAuth) => all<QuoPhoneNumber>(env, 'phone-numbers', []);
 
@@ -159,6 +187,29 @@ export function toTimeline(messages: QuoMessage[], calls: QuoCall[]): Observed[]
   return timeline.sort((a, b) => a.at - b.at);
 }
 
+/**
+ * The voicemail left on one call, or null if there wasn't one.
+ *
+ * GET /v1/call-voicemails/{callId} answers 404 "Call voicemail not found" for a
+ * call that just rang out — 14 of 64 on the live line — so 404 is a normal
+ * answer, not a failure. Any other error is logged and treated as "no
+ * voicemail": this is enrichment on top of a call we already recorded, and
+ * losing it must never cost us the call itself or stall the cursor.
+ */
+export async function fetchVoicemail(env: QuoAuth, callId: string, fetchImpl: Fetch = fetch): Promise<QuoVoicemail | null> {
+  const res = await fetchImpl(new URL(API + 'call-voicemails/' + encodeURIComponent(callId)), { headers: { Authorization: env.QUO_API_KEY ?? '' } });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    console.warn(`quo voicemail ${callId} -> ${res.status}; treated as no voicemail`);
+    return null;
+  }
+  const body = await res.json() as { data?: QuoVoicemail };
+  return body?.data ?? null;
+}
+
+/** A call that could have gone to voicemail: they rang us and nobody picked up. */
+const couldHaveVoicemail = (c: QuoCall) => c.direction === 'incoming' && c.answeredAt == null && !!c.id;
+
 /** Every message and call in one conversation created after `since`, as a timeline. */
 export async function readConversation(env: QuoAuth, c: QuoConversation, since: number, opts: ReadOptions = {}) {
   const base: [string, string][] = [
@@ -170,7 +221,56 @@ export async function readConversation(env: QuoAuth, c: QuoConversation, since: 
   const messages = await all<QuoMessage>(env, 'messages', base, opts);
   // The calls endpoint accepts a single participant, so group threads have no call history.
   const calls = c.participants.length === 1 ? await all<QuoCall>(env, 'calls', base, opts) : [];
+  // One extra request per unanswered incoming call, newest first, capped per run.
+  let lookups = 0;
+  for (const call of [...calls].sort((a, b) => secs(b.createdAt) - secs(a.createdAt))) {
+    if (!couldHaveVoicemail(call)) continue;
+    if (lookups >= QUO_LIMITS.voicemailsPerConversation || opts.budget?.canAfford(1, 0) === false) {
+      console.warn(`quo: not looking up the voicemail on ${call.id} this run (${lookups} done); it stays a missed call until the thread is read again`);
+      break;
+    }
+    lookups++;
+    call.voicemail = await fetchVoicemail(env, call.id as string, opts.fetch ?? fetch);
+  }
   return { messages, calls, timeline: toTimeline(messages, calls) };
+}
+
+/**
+ * What a phone thread is, from its newest activity (round 14). "Call" told the
+ * agent nothing: 52 of the 52 phone threads in the queue were titled that, so
+ * the section read as noise whatever was in it.
+ *
+ * `contentForTriage` is the customer's words only — voicemail transcripts and
+ * inbound texts. Our own outgoing texts must never classify their thread.
+ * Pure.
+ */
+export function phoneSummary(messages: QuoMessage[], calls: QuoCall[]): { subject: string; preview: string | null; contentForTriage: string } {
+  const events = [
+    ...messages.map((m) => ({ at: secs(m.createdAt), kind: 'message' as const, m })),
+    ...calls.map((c) => ({ at: secs(c.createdAt), kind: 'call' as const, c })),
+  ].sort((a, b) => a.at - b.at);
+
+  const newest = events.at(-1);
+  let subject = 'Call';
+  let preview: string | null = null;
+  if (newest?.kind === 'message') {
+    subject = 'Text';
+    preview = newest.m.text?.trim() ? newest.m.text.slice(0, 200) : null;
+  } else if (newest?.kind === 'call') {
+    const c = newest.c;
+    subject = c.answeredAt ? 'Call'
+      : c.direction === 'outgoing' ? 'Outgoing call'
+      : c.voicemail ? 'Voicemail'
+      : 'Missed call';
+    if (c.voicemail?.transcript) preview = c.voicemail.transcript.slice(0, 200);
+  }
+
+  const contentForTriage = [
+    ...calls.map((c) => c.voicemail?.transcript ?? ''),
+    ...messages.filter((m) => m.direction === 'incoming').map((m) => m.text ?? ''),
+  ].filter(Boolean).join('\n');
+
+  return { subject, preview, contentForTriage };
 }
 
 interface Scan {
@@ -267,7 +367,7 @@ export async function ingestQuo(env: IngestEnv, budget: Budget = Budget.from(env
         const c = scan.pending[0];
         const itemId = `quo:${c.id}`;
         try {
-          const { messages, calls, timeline } = await readConversation(env, c, scan.since, { fetch: budget.fetch, maxPages: QUO_LIMITS.pagesPerConversation });
+          const { messages, calls, timeline } = await readConversation(env, c, scan.since, { fetch: budget.fetch, maxPages: QUO_LIMITS.pagesPerConversation, budget });
           // Each outbound can end a wait and add a response row.
           const writes = CONVERSATION_QUERIES + timeline.filter((e) => !e.inbound).length + 1;
           if (writes > budget.maxQueries || writes > budget.maxSubrequests) {
@@ -326,7 +426,7 @@ export async function syncQuoActivity(
 ): Promise<boolean> {
   const timeline = toTimeline(activity.messages, activity.calls);
   if (!timeline.length) return false;
-  await syncConversation(env, src, c, activity.messages, timeline, now);
+  await syncConversation(env, src, c, activity.messages, activity.calls, timeline, now);
   return true;
 }
 
@@ -399,24 +499,29 @@ export async function ingestQuoWebhookEvent(db: Db, event: unknown, now: number)
 /** Write one conversation's observed timeline to its thread. */
 async function syncConversation(
   env: IngestEnv, src: { id: string; brand_id: string }, c: QuoConversation,
-  messages: QuoMessage[], timeline: Observed[], now: number,
+  messages: QuoMessage[], calls: QuoCall[], timeline: Observed[], now: number,
 ) {
   const newest = (inbound: boolean): number | null => {
     const times = timeline.filter((m) => m.inbound === inbound).map((m) => m.at);
     return times.length ? Math.max(...times) : null;
   };
-  const latest = [...messages].sort((a, b) => secs(b.createdAt) - secs(a.createdAt))[0];
+  const { subject, preview, contentForTriage } = phoneSummary(messages, calls);
+  // Only a demotion is passed on. An observation with no matching content must
+  // not quietly promote a thread back out of spam, and a human verdict
+  // (triage_by) is protected in syncThread either way.
+  const verdict = classifyContent(contentForTriage);
 
   await syncThread(env.DB, {
     id: `quo:${c.id}`,
     source_id: src.id,
     brand_id: src.brand_id,
     channel: 'phone',
-    subject: messages.length ? 'Text' : 'Call',
+    subject,
     customer_name: c.name ?? null,
     customer_handle: c.participants[0] ?? null,
     refresh_customer: false,
-    preview: latest?.text ? latest.text.slice(0, 200) : null,
+    preview,
+    triage: verdict.demote ? { tier: verdict.tier, score: verdict.score, signals: verdict.signals.map((s) => ({ code: s.code, why: s.why })) } : undefined,
     conversation_started_at: secs(c.createdAt),
     newest_inbound_at: newest(true),
     newest_outbound_at: newest(false),

@@ -49,7 +49,12 @@ function row(t, esc, o, reasons) {
       `<span class="edge" style="background:${color}"></span>` +
       `<span class="age num" style="color:${color}">${esc(o.ageText(t))}</span>` +
       '<span class="body">' +
-        `<span class="subject">${esc(t.subject)}</span><br>` +
+        `<span class="subject">${esc(t.subject)}</span>` +
+        // A phone row's subject is only its kind (Voicemail, Missed call, Text),
+        // so the voicemail transcript or the text rides alongside it, the way an
+        // email row's subject line is already its snippet. Round 14.
+        (t.channel === 'phone' && t.preview ? `<span class="snippet"> — ${esc(t.preview)}</span>` : '') +
+        '<br>' +
         `<span class="from">${esc(t.customer_name ?? t.customer_handle ?? '')} · ${esc(o.brandName(t.brand_id))}</span>` +
       '</span>' +
       '<span class="meta">' +

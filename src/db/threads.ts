@@ -115,6 +115,10 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
   // conversation_started_at is deliberately absent: it never changes after insert.
   const res = await db.prepare(`
     UPDATE thread SET
+      -- What the thread is can change with new activity: a phone thread that
+      -- was a missed call becomes a voicemail once Quo finishes processing it
+      -- (round 14). An email thread's subject is the same string every time.
+      subject          = COALESCE(?19, subject),
       customer_name    = CASE WHEN ?2 THEN ?3 ELSE customer_name END,
       customer_handle  = CASE WHEN ?2 THEN ?4 ELSE customer_handle END,
       preview          = COALESCE(?5, preview),
@@ -148,6 +152,7 @@ export async function syncThread(db: Db, o: ThreadObservation, now: number): Pro
     existing.status, existing.awaiting_since, existing.last_inbound_at, existing.last_outbound_at,
     state.unblocked ? 1 : 0,
     o.triage?.tier ?? null, o.triage?.score ?? null, o.triage ? JSON.stringify(o.triage.signals) : null,
+    o.subject ?? null,
   ).run();
 
   if (res.meta.changes === 0) return 'skipped';

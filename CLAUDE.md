@@ -129,6 +129,13 @@ never from `conversation_started_at`. The rules live once, in `src/lib/thread-st
     the thread.
 - **Closed with nothing new:** stays `closed`, with `awaiting_since` NULL. Closing through
   `POST /api/actions` also sets it NULL.
+- **A call is only contact if someone answered it** (round 14, measured on the live line).
+  `answeredAt` is the only field that says a human picked up. `status` does not: 3 of 72 real
+  incoming calls were `status = 'completed'` with `answeredAt` null and `duration` 0. So:
+  - answered inbound call → inbound, then outbound at `answeredAt` (nothing is waiting on us)
+  - answered outbound call → outbound at `answeredAt`
+  - unanswered inbound call → inbound only, the clock runs (missed call, or voicemail)
+  - unanswered outbound call → nothing; trying to call back is not reaching them
 - **The agent's chosen status is authoritative.**
   - An action of kind `replied` or `called` (`POST /api/actions`) always sets
     `last_outbound_at` (contact).
@@ -241,6 +248,19 @@ tier is shown, and every non-customer verdict carries its reasons to the UI.
   - The spam section is always expanded, never behind a click. Each row shows the sender
     address and the full subject, never truncated.
   - Tests: `tests/queue-sections.test.mjs`.
+- **Phone content is triaged by the same module** (round 14). A voicemail transcript or a text
+  has no headers, so `classifyContent()` in `src/lib/triage.ts` judges the words: spam or nothing,
+  never bulk, every match carrying its reason.
+  - Rules today: `google_listing` and `google_verification`, the owner's, for this line.
+  - They are deliberately tight — the words must be within a sentence of each other, and it is the
+    noun "verification", never "verify" — because a customer saying "I found you on Google, can
+    you verify my order?" must stay in Needs reply.
+  - Only a demotion is written. An observation with no match never promotes a thread back out of
+    spam; that is what rescue is for.
+  - The text judged is the customer's words only: voicemail transcripts and inbound texts, never
+    our own outgoing messages.
+  - Sized against 50 real voicemail transcripts before being written (`prove/quo-calls.mjs`,
+    counts only; the transcripts never enter the repo or a commit).
 - **Rules change only after the owner reads real output from the full received stream**
   (`prove/triage.mjs`, same query, every list paged).
 - `prove/_triage-rules.mjs` is a plain-JS copy of the rules for the prove script. A parity test
@@ -401,7 +421,9 @@ src/index.ts              console Worker: auth (Access JWT), /api routes (paged 
 src/hooks.ts              hooks Worker: /hooks/quo only (no Access)
 src/webhook.ts            the Quo webhook handler: rate limit, verify, dedupe by webhook-id, syncQuoActivity
 src/ingest/gmail.ts       Gmail threads (service-account auth) → timeline → syncThread (customer = first inbound sender)
-src/ingest/quo.ts         Quo v1 messages + calls since source.sync_cursor → syncThread
+src/ingest/quo.ts         Quo v1 messages + calls since source.sync_cursor → syncThread; one
+                          /v1/call-voicemails/{callId} lookup per unanswered inbound call (404 =
+                          it rang out); phoneSummary() titles the thread from its newest activity
 src/ingest/chat.ts        provider-agnostic chat → syncThread (not routed yet)
 src/db/db.ts              Db: the database surface ingest uses (binding or REST client)
 src/db/d1-http.ts         D1 over Cloudflare's REST API: retries 429, retries 5xx for reads only
@@ -419,6 +441,9 @@ public/render.mjs         escaped HTML builders (thread, history, to-dos, matrix
 public/freshness.mjs      last-sync classification, badges, empty/failed queue messages
 public/paging.mjs         refresh that keeps pages the agent opened
 RUNBOOK.md                the ordered deploy steps, mine vs yours, and what can't be undone
+prove/quo-calls.mjs       read-only: what Quo returns for a call, whether a voicemail and a
+                          transcript exist, and how many transcripts a candidate rule would match.
+                          Prints field names, codes and counts; never transcript text without --preview.
 prove/*.mjs               run-by-hand source proofs; need real credentials (Gmail: GOOGLE_SERVICE_ACCOUNT_FILE).
                           quo.mjs --quiet prints the phone-number ids only, reading no conversation.
                           Never in cron. backfill-known-senders.mjs (one-off), apply-known-senders.mjs

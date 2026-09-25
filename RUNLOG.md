@@ -5,6 +5,77 @@ still unproven.
 
 ---
 
+## Round 14 — the phone queue says what it is (2026-09-25, branch `claude/inh-round-14`, cut from `main`)
+
+Nothing was deployed, merged, pushed, or PR'd. The console is live; every API call this round was a
+read.
+
+### What the investigation found (before any code changed)
+`prove/quo-calls.mjs` (new, read-only) against the live InHouse line, 14 days, 72 calls:
+- **`answeredAt` is the only field that means a human answered.** `status: 'completed'` does not —
+  3 of 72 incoming calls were `completed` with `answeredAt` null and 0 seconds.
+- **61 incoming `no-answer`, 2 incoming answered, 6 outgoing answered, 0 unanswered outgoing.**
+- **Voicemail is a separate request**, `/v1/call-voicemails/{callId}`, and **it carries a
+  transcript**. 50 of 64 unanswered inbound calls had one; the other 14 answered 404, which is the
+  normal "it rang out".
+- **Call transcripts are not available on this plan** (404 on every probe; the docs limit them to
+  business and scale), and there are no recordings to transcribe. Voicemail transcripts are
+  unaffected, so the content rules have something real to work on.
+- **The 52 threads were not mislabelled answered calls.** Our `answeredAt` mapping was already
+  right. They were a robocall campaign: 50 voicemails from **48 distinct numbers**, 46 mentioning
+  Google, 46 saying "press 1". No sender rule can catch that; only content can.
+Full tables in HANDOFF, "The phone queue: what Quo actually returns".
+
+### What changed
+1. **Voicemail ingest.** One lookup per unanswered inbound call, newest first, capped at 10 per
+   conversation and spent only out of what is left of the run's budget — enrichment is never
+   reserved ahead of the call it decorates, so throughput per run is unchanged. A 404 is an answer;
+   any other error is a warning and "no voicemail", never a conversation failure.
+2. **Phone threads are titled by their newest activity** (`phoneSummary`, pure): Voicemail, Missed
+   call, Text, Call, Outgoing call. A voicemail's transcript becomes the preview.
+3. **Content triage** (`classifyContent` in `src/lib/triage.ts`, beside the email rules):
+   `google_listing` and `google_verification`, spam tier, reasons carried to the UI. Tight on
+   purpose — the noun "verification", never "verify", so a customer asking us to "verify my order"
+   after finding us on Google stays in Needs reply. Only a demotion is written, so a later text
+   with no keywords can't quietly promote a thread out of spam.
+4. **`syncThread` now updates `subject`.** It never did, so every phone thread kept the title it
+   was inserted with. Without this the fix would only reach new threads.
+5. **Queue rows carry a bounded preview** (`substr(t.preview,1,120)`), and a phone row renders it
+   beside its kind. Round 11 took preview off the list for CPU; a row that says only "Voicemail"
+   needs it back, and 120 characters a row is the price.
+6. **The nav lists InHouse Wellness and Caliza Group only.** THI and Reach Julian keep their brand
+   rows — THI is a real future tab — and a test pins both facts.
+
+### Failing first, then passing
+- Content rules: 1/5 failed (no `classifyContent`), 5/5 after.
+- Phone ingest: 15 failed to even load (no `phoneSummary`), then 2 real failures — the fake Quo API
+  couldn't carry message text, and `syncThread` didn't update `subject` — then 17/17.
+- UI rows and nav: 4/7 failed, 7/7 after.
+- **Totals: 354 tests, 354 pass, 0 fail.** `check` and `build` clean.
+
+### Breaks verified (11), including three that exposed weak tests
+- Mapping answered from `status === 'completed'` → caught by the "completed does not mean answered"
+  case, which was added *because* the live data showed 3 such calls.
+- Never looking up a voicemail → 5 failures. Looking one up on every call → caught.
+- **A 404 voicemail treated as an error → NOT caught at first.** Both paths returned null, so the
+  test proved nothing. It now asserts there is no warning either: 14 of 64 calls answer 404, and a
+  dozen warnings a run would bury a real one.
+- **Writing the verdict even when it doesn't demote → NOT caught at first.** The test's second
+  ingest run never re-read the conversation (its activity was older than the cursor), so nothing
+  was exercised. Fixed by making the new text newer than the cursor, and by asserting the re-read
+  happened.
+- **Loosening `google_verification` to "verify" → NOT caught at first.** Every false-positive case
+  had a sentence break between "Google" and "verify". Added "I found you on Google and I need to
+  verify my order before Friday", which is the case the rule exists to protect.
+- Also caught: dropping the snippet from the row; sending the whole preview to the list; putting
+  THI back in the nav; rendering the transcript unescaped; reverting the `subject` update.
+
+### Still to run against production (a human; see the reply)
+Registering `PN8WZAnkxN` as the Caliza phone source, and one cursor reset so the 52 existing
+threads are re-read and re-titled in place.
+
+---
+
 ## Round 13 — a rate limit that needs no zone (2026-09-24, branch `claude/inh-round-13`, cut from `claude/inh-round-12`)
 
 Nothing was deployed, merged, pushed, or PR'd. One behaviour change: the rate limit.

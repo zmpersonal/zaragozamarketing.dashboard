@@ -109,7 +109,15 @@ produces a second measurement.
     takes.
   - Reads every text and call created since a cursor stored per source, so an inbound that was
     answered before the next poll is still seen.
-  - An answered call counts as contact; a missed call is waiting.
+  - An answered call counts as contact; a missed call is waiting. Answered means `answeredAt` is
+    set — `status: 'completed'` does not mean anyone picked up (round 14, measured on the line).
+  - Every unanswered inbound call gets one `/v1/call-voicemails/{callId}` lookup. A voicemail
+    carries a transcript, which becomes the thread's preview and is judged by the content rules in
+    `src/lib/triage.ts`. A 404 means it rang out, which is normal, not a failure.
+  - A phone thread is titled by its newest activity: **Voicemail**, **Missed call**, **Text**,
+    **Call** (answered) or **Outgoing call**. Everything used to be "Call".
+  - Call transcripts (for answered calls) need Quo's business plan and are not available here; the
+    line has no call recordings either. Voicemail transcripts are unaffected.
   - A conversation that fails 3 times in a row is skipped, so it can't hold the cursor back
     forever. It stays visible in `ingest_failure` and on `GET /api/board`.
   - The source `address` should be the Quo phone-number id (`PN…`).

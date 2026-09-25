@@ -137,3 +137,54 @@ export function classify(msg: Msg, ex: Exemptions): Verdict {
   const tier: Tier = gmailSpam ? 'spam' : score >= 2 ? 'bulk' : 'customer';
   return { tier, demote: tier !== 'customer', score, signals };
 }
+
+/**
+ * Content rules (round 14) — phone.
+ *
+ * A voicemail transcript or a text has no headers, so none of the signals
+ * above can see it. These are the owner's rules for this line, and they are
+ * here rather than in the phone ingest so that every triage rule stays in one
+ * pure module with one Verdict shape.
+ *
+ * Sized against 50 real voicemail transcripts before being written
+ * (prove/quo-calls.mjs prints counts only; the transcripts never leave the
+ * owner's machine):
+ *   - 46 of 50 mention Google at all, from 48 distinct caller numbers, so the
+ *     campaign rotates numbers and only content can catch it.
+ *   - `google_listing` matches 28 of 50.
+ *   - `google_verification` matches 0 of 50 in that window. It is kept because
+ *     the owner has seen it, and because it costs nothing when it doesn't fire.
+ *
+ * Both are deliberately tight: the words must be within a sentence of each
+ * other, and "verification" is the noun only. A customer saying "I found you
+ * on Google, can you verify my order?" must stay in Needs reply, and a rule
+ * that demoted them would be worse than the noise it removes.
+ */
+const CONTENT_RULES: { code: string; why: string; test: RegExp }[] = [
+  {
+    code: 'google_listing',
+    why: 'voicemail or text about a Google listing',
+    test: /\bgoogle\b[^.?!]{0,30}\blisting|\blisting\b[^.?!]{0,30}\bgoogle\b/i,
+  },
+  {
+    code: 'google_verification',
+    why: 'voicemail or text about Google verification',
+    test: /\bgoogle\b[^.?!]{0,20}\bverificat|\bverificat\w*\b[^.?!]{0,20}\bgoogle\b/i,
+  },
+];
+
+/**
+ * Judge a voicemail transcript or message text. Spam or nothing: these rules
+ * never make something bulk, and every match carries its reason to the UI
+ * (invariant 5). No content, or no rule matched, leaves the thread alone.
+ */
+export function classifyContent(text: string | null | undefined): Verdict {
+  const signals: Signal[] = [];
+  if (typeof text === 'string' && text.trim()) {
+    for (const rule of CONTENT_RULES) {
+      if (rule.test.test(text)) signals.push({ code: rule.code, why: rule.why, weight: 0 });
+    }
+  }
+  if (!signals.length) return { tier: 'customer', demote: false, score: 0, signals: [] };
+  return { tier: 'spam', demote: true, score: 0, signals };
+}

@@ -153,6 +153,7 @@
   .row .subject {
     font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  .row .snippet { font-weight: 400; color: var(--steam); }
   .row .from {
     font-size: 12.5px; color: var(--steam);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -330,11 +331,12 @@ import { reloadLoadedPages } from './paging.mjs';
 // can't reach the API says so, and never shows an empty queue instead.
 // ---------------------------------------------------------------
 
+// The tabs the console shows today. THI and Reach Julian keep their rows in the
+// brand table — THI is a real future tab — but nothing about them is on screen
+// until there is a source behind them (round 14).
 const BRANDS = [
   { id: 'inhouse',     name: 'InHouse Wellness' },
-  { id: 'thi',         name: 'THI' },
   { id: 'caliza',      name: 'Caliza Group' },
-  { id: 'reachjulian', name: 'Reach Julian' },
 ];
 const TIERS = SECTIONS.map((s) => s.tier);
 const REFRESH_MS = 60_000;

@@ -106,15 +106,20 @@ test('a bad tier or offset is 400', async () => {
   }
 });
 
-test('queue rows carry only what the list renders; preview and notes come with the thread', async () => {
+test('queue rows carry only what the list renders; notes and the full preview come with the thread', async () => {
   const env = makeApiEnv();
   seed(env, { customers: 1 });
-  env.DB.raw.prepare("UPDATE thread SET preview = 'a long preview', blocked_note = 'note' WHERE id = 'gmail:c0'").run();
+  const long = 'a long preview '.repeat(40);
+  env.DB.raw.prepare('UPDATE thread SET preview = ?, blocked_note = ? WHERE id = ?').run(long, 'note', 'gmail:c0');
   const { body } = await get(env, '?tier=customer');
-  assert.deepEqual(Object.keys(body.threads[0]).sort(), ['assignee', 'awaiting_since', 'blocked_on', 'blocked_since', 'brand_id', 'channel', 'conversation_started_at', 'customer_handle', 'customer_name', 'id', 'is_automated', 'status', 'subject', 'triage', 'triage_signals']);
+  // preview joined the row in round 14: a phone row's subject is only its kind
+  // ("Voicemail"), so the transcript is what tells one row from another. It is
+  // truncated in SQL, and blocked_note still never travels with the list.
+  assert.deepEqual(Object.keys(body.threads[0]).sort(), ['assignee', 'awaiting_since', 'blocked_on', 'blocked_since', 'brand_id', 'channel', 'conversation_started_at', 'customer_handle', 'customer_name', 'id', 'is_automated', 'preview', 'status', 'subject', 'triage', 'triage_signals']);
+  assert.equal(body.threads[0].preview.length, 120, 'the row carries a bounded preview, not the whole thing');
   const token = await mintToken({ email: OWNER });
   const detail = await withAccess(() => worker.fetch(new Request('https://console.example/api/threads/gmail:c0', { headers: { 'Cf-Access-Jwt-Assertion': token } }), env));
-  assert.equal((await detail.json()).thread.preview, 'a long preview');
+  assert.equal((await detail.json()).thread.preview, long, 'the whole preview is on the thread');
 });
 
 test('threads waiting since the same second still page without repeats or gaps', async () => {
